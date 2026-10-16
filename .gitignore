@@ -1,0 +1,70 @@
+# ============================================
+# Git Ignore - Autonomous Self-Healing Data Pipeline
+# ============================================
+
+# Python Environments & Packages
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.cache/
+
+# Node & Frontend Build Artifacts
+node_modules/
+dashboard-ui/node_modules/
+dashboard-ui/dist/
+dashboard-ui/.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# AI Assistant & IDE Internal Configurations
+.agents/
+.claude/
+.gemini/
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment Variables & Secrets
+.env
+.env.local
+.env.*.local
+.env.development
+.env.test
+.env.production
+!.env.example
+
+# Runtime Logs (Preserve directory structure via .gitkeep)
+logs/*.jsonl
+logs/*.log
+*.log
+
+# Operating System Files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+[Dd]esktop.ini
