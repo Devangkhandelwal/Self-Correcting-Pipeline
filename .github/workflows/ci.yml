@@ -1,0 +1,116 @@
+name: CI
+
+# Replaces a hand-written "242 passing" badge, which was true the day it was
+# written and would have quietly become false on the next added test.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Verifies the "Python 3.10+" claim in the README rather than
+        # asserting it. If 3.10 breaks, the badge is wrong, not the build.
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests
+        # The suite is offline by design (see conftest.py), so it must pass
+        # before any dataset or model exists -- which is also the state a
+        # fresh clone is in, since data/ is not tracked.
+        run: pytest tests/ -q
+
+      - name: Build the dataset and train Layer 1
+        # Exercises the documented first-run path end to end.
+        run: python run_data_and_train.py
+
+      - name: Run tests again with a trained model present
+        # Layer 1 takes a different code path once a model exists, so both
+        # states need covering.
+        run: pytest tests/ -q
+
+      - name: Smoke-test the CLI demo across pipelines and anomalies
+        run: |
+          python demo_pipeline.py --pipeline weather   --anomaly schema_drift
+          python demo_pipeline.py --pipeline finance   --anomaly null_field
+          python demo_pipeline.py --pipeline ecommerce --anomaly outlier
+          python demo_pipeline.py --pipeline iot       --anomaly duplicate_record
+
+  frontend:
+    name: Agent console
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard-ui
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: dashboard-ui/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: dashboard-ui/package-lock.json
+
+      # Blocking: these are the dependencies that actually ship in dist/.
+      - name: Audit production dependencies
+        working-directory: dashboard-ui
+        run: npm audit --omit=dev --audit-level=high
+
+      # Informational: dev-server advisories do not ship, but they do affect
+      # anyone running `npm run dev`, so they stay visible in the log without
+      # failing the build on an advisory published upstream overnight.
+      - name: Audit all dependencies (informational)
+        working-directory: dashboard-ui
+        continue-on-error: true
+        run: npm audit --audit-level=high

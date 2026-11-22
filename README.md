@@ -2,7 +2,12 @@
 
 <!-- Every version below matches requirements.txt or dashboard-ui/package.json.
      Badges for XGBoost and Tailwind CSS were removed because neither is used
-     anywhere in the project. -->
+     anywhere in the project.
+
+     The CI badge is live: it reflects the actual result of .github/workflows/ci.yml
+     on main. It replaced a hand-written "242 passing" badge, which was true the
+     day it was written and would have quietly gone stale on the next added test.
+     Do not reintroduce a hardcoded count. -->
 
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![Flask](https://img.shields.io/badge/Flask-3.x-000000.svg?logo=flask&logoColor=white)](https://flask.palletsprojects.com/)
@@ -15,7 +20,7 @@
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.28%2B-FF4B4B.svg?logo=streamlit&logoColor=white)](https://streamlit.io/)
 [![Oxlint](https://img.shields.io/badge/Oxlint-clean-4B32C3.svg?logo=oxc&logoColor=white)](https://oxc.rs/)
 
-[![Tests](https://img.shields.io/badge/pytest-242%20passing-0A9EDC.svg?logo=pytest&logoColor=white)](tests/)
+[![CI](https://github.com/Devangkhandelwal/Self-Correcting-Pipeline/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Devangkhandelwal/Self-Correcting-Pipeline/actions/workflows/ci.yml)
 [![Offline](https://img.shields.io/badge/test%20suite-no%20network-informational.svg)](conftest.py)
 [![Sandbox](https://img.shields.io/badge/patch%20sandbox-AST%20allowlist%20%2B%20subprocess-important.svg)](src/layer3_patcher/sandbox.py)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
