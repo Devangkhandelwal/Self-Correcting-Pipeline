@@ -187,6 +187,7 @@ def create_app() -> Flask:
             "layer3_verification": None,
             "healed_payload": None,
             "heal_success": None,
+            "quarantined_fields": [],
         }
 
         is_duplicate = bool(
@@ -200,6 +201,7 @@ def create_app() -> Flask:
         known_aliases = {
             alias: canonical for canonical, alias in pipeline.field_renames.items()
         }
+        quarantine_fields = pipeline.quarantine_fields()
 
         try:
             diagnosis = diagnostician.diagnose(
@@ -219,16 +221,24 @@ def create_app() -> Flask:
                 expected_schema=pipeline.expected_schema,
                 valid_ranges=pipeline.valid_ranges,
                 known_aliases=known_aliases,
+                quarantine_fields=quarantine_fields,
             )
             result["layer3_patch"] = patch_code
             result["layer3_verification"] = verification
             result["heal_success"] = success
 
             if success:
-                result["healed_payload"] = orchestrator.parse(
+                healed = orchestrator.parse(
                     corrupted,
                     pipeline_id=pipeline.pipeline_id,
                     is_duplicate=is_duplicate,
+                )
+                result["healed_payload"] = healed
+                # Non-empty means the record kept a valid shape but must
+                # not be aggregated: a field that cannot tolerate an
+                # invented value got one.
+                result["quarantined_fields"] = list(
+                    orchestrator.quarantined_fields(healed)
                 )
         except Exception as exc:
             logger.exception("Pipeline run failed during diagnosis/healing")

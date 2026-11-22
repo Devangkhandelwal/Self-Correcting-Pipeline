@@ -116,8 +116,18 @@ def run_demo(pipeline_id: str = "weather", anomaly: str = "schema_drift") -> boo
     )
     print(json.dumps(healed, indent=2))
 
+    quarantined = orchestrator.quarantined_fields(healed)
+
     print("\n" + RULE)
-    if success:
+    if success and quarantined:
+        # Claiming "no intervention required" here would be false: the record
+        # is correctly shaped but carries values the parser invented for
+        # fields that cannot tolerate one.
+        print("[PARTIAL] PARSER HEALED AND ACTIVE, BUT THIS RECORD IS QUARANTINED.")
+        print(f"          Invented values on: {', '.join(quarantined)}")
+        print("          Later records will parse cleanly; this one must be kept")
+        print("          out of aggregates and downstream consumers.")
+    elif success:
         print("[SUCCESS] PIPELINE AUTO-HEALED - NO HUMAN INTERVENTION REQUIRED.")
     else:
         print("[FAILED] PIPELINE COULD NOT BE HEALED AUTOMATICALLY.")

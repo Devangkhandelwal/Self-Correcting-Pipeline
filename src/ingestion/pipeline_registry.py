@@ -18,6 +18,13 @@ import requests
 from src.utils import config
 from src.utils.logger import logger
 
+#: Missing-value policies. `backfill` substitutes a schema-safe default;
+#: `quarantine` substitutes one too, so the record keeps a valid shape, but
+#: flags the record so it is kept out of the main stream.
+POLICY_BACKFILL = "backfill"
+POLICY_QUARANTINE = "quarantine"
+POLICIES = (POLICY_BACKFILL, POLICY_QUARANTINE)
+
 #: Provenance values reported via BasePipeline.last_fetch_source.
 SOURCE_LIVE = "live"
 SOURCE_CACHED = "cached_baseline"
@@ -36,6 +43,7 @@ class BasePipeline:
         expected_schema: Dict[str, type],
         valid_ranges: Dict[str, Tuple[float, float]],
         field_renames: Dict[str, str],
+        missing_value_policy: Optional[Dict[str, str]] = None,
     ):
         self.pipeline_id = pipeline_id
         self.name = name
@@ -44,6 +52,23 @@ class BasePipeline:
         self.expected_schema = expected_schema
         self.valid_ranges = valid_ranges
         self.field_renames = field_renames
+        # Fields not listed here fall back to POLICY_BACKFILL.
+        self.missing_value_policy = missing_value_policy or {}
+        unknown = set(self.missing_value_policy) - set(expected_schema)
+        if unknown:
+            raise ValueError(
+                f"{pipeline_id}: missing_value_policy names unknown fields: "
+                f"{', '.join(sorted(unknown))}"
+            )
+        bad = {
+            field: policy
+            for field, policy in self.missing_value_policy.items()
+            if policy not in POLICIES
+        }
+        if bad:
+            raise ValueError(
+                f"{pipeline_id}: invalid policies {bad}; valid: {', '.join(POLICIES)}"
+            )
         # Provenance of the most recent fetch_clean_sample() call. Held
         # out-of-band rather than injected into the payload, which would show
         # up as an unexpected extra key in the Layer 1 feature vector.
@@ -52,6 +77,17 @@ class BasePipeline:
     def get_schema_spec(self) -> Dict[str, str]:
         """Schema as JSON-serialisable type names, e.g. {'amount': 'float'}."""
         return {field: declared.__name__ for field, declared in self.expected_schema.items()}
+
+    def policy_for(self, field: str) -> str:
+        """Missing-value policy for one field."""
+        return self.missing_value_policy.get(field, POLICY_BACKFILL)
+
+    def quarantine_fields(self) -> Tuple[str, ...]:
+        """Fields for which an invented or altered value taints the record."""
+        return tuple(
+            field for field in self.expected_schema
+            if self.policy_for(field) == POLICY_QUARANTINE
+        )
 
     def fetch_clean_sample(self) -> Dict[str, Any]:
         raise NotImplementedError
@@ -64,6 +100,7 @@ class BasePipeline:
             "description": self.description,
             "schema": self.get_schema_spec(),
             "valid_ranges": {k: list(v) for k, v in self.valid_ranges.items()},
+            "quarantine_fields": list(self.quarantine_fields()),
         }
 
 
@@ -106,6 +143,16 @@ class WeatherPipeline(BasePipeline):
                 "precipitation": "precip",
                 "surface_pressure": "pressure",
                 "wind_speed_10m": "wind_speed",
+            },
+            missing_value_policy={
+                # An observation with no location or time cannot be placed,
+                # and 0.0/0.0 is a real point in the Gulf of Guinea -- the
+                # classic "null island" artefact in geospatial data.
+                "latitude": POLICY_QUARANTINE,
+                "longitude": POLICY_QUARANTINE,
+                "time": POLICY_QUARANTINE,
+                # Metrics tolerate a flagged default: a dropped sensor reading
+                # is an ordinary operational event, and _healing records it.
             },
         )
         self.latitude = latitude if latitude is not None else config.WEATHER_LATITUDE
@@ -202,6 +249,16 @@ class FinancePipeline(BasePipeline):
                 "risk_score": "fraud_score",
                 "amount": "tx_amount",
             },
+            missing_value_policy={
+                # Identity fields: an invented id makes the row unjoinable and
+                # double-counts in GROUP BY.
+                "transaction_id": POLICY_QUARANTINE,
+                "user_id": POLICY_QUARANTINE,
+                "merchant_id": POLICY_QUARANTINE,
+                # Money: an invented or clamped amount corrupts SUM and AVG.
+                "amount": POLICY_QUARANTINE,
+                # currency, risk_score and timestamp tolerate a flagged default.
+            },
         )
 
     def fetch_clean_sample(self) -> Dict[str, Any]:
@@ -245,6 +302,13 @@ class ECommercePipeline(BasePipeline):
                 "unit_price": "price",
                 "reorder_level": "min_stock",
                 "category": "item_cat",
+            },
+            missing_value_policy={
+                "item_id": POLICY_QUARANTINE,
+                "sku": POLICY_QUARANTINE,
+                # Price drives revenue figures; stock drives reorder decisions.
+                "unit_price": POLICY_QUARANTINE,
+                "stock_quantity": POLICY_QUARANTINE,
             },
         )
 
@@ -291,6 +355,12 @@ class IoTPipeline(BasePipeline):
                 "temperature_c": "temp_celsius",
                 "pressure_psi": "press_psi",
                 "motor_rpm": "rpm",
+            },
+            missing_value_policy={
+                # Telemetry attributed to the wrong turbine is worse than
+                # absent telemetry.
+                "device_id": POLICY_QUARANTINE,
+                "timestamp": POLICY_QUARANTINE,
             },
         )
 

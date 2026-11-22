@@ -322,8 +322,14 @@ export default function App() {
                           ? `Anomaly: ${detection.anomaly_type}`
                           : 'Normal'}
                       </span>
-                      {pipelineResult.heal_success === true && (
+                      {pipelineResult.heal_success === true &&
+                        !(pipelineResult.quarantined_fields || []).length && (
                         <span className="badge badge--healed">Auto-Healed</span>
+                      )}
+                      {!!(pipelineResult.quarantined_fields || []).length && (
+                        <span className="badge badge--quarantine">
+                          Quarantined: {pipelineResult.quarantined_fields.join(', ')}
+                        </span>
                       )}
                       {pipelineResult.heal_success === false && (
                         <span className="badge badge--anomaly">Heal Failed</span>

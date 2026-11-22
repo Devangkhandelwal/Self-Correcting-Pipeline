@@ -102,3 +102,20 @@ def test_duplicate_request_is_detected_on_the_very_first_call(client):
     assert body["layer1_detection"]["anomaly_type"] == "duplicate_record"
     assert body["is_duplicate"] is True
     assert body["healed_payload"]["_is_duplicate"] is True
+
+
+def test_quarantined_fields_are_reported(client):
+    """A caller must be able to see that a record is not safe to aggregate."""
+    body = client.post(
+        "/api/run-pipeline",
+        json={"pipeline_id": "finance", "anomaly_type": "outlier"},
+    ).get_json()
+    assert "quarantined_fields" in body
+    assert isinstance(body["quarantined_fields"], list)
+
+
+def test_pipelines_endpoint_publishes_the_quarantine_policy(client):
+    body = client.get("/api/pipelines").get_json()
+    finance = next(p for p in body["pipelines"] if p["id"] == "finance")
+    assert "amount" in finance["quarantine_fields"]
+    assert "currency" not in finance["quarantine_fields"]

@@ -30,8 +30,27 @@ NUMERIC_TYPES = {"float", "int"}
 #: Key under which the generated parser records what it changed.
 PROVENANCE_KEY = "_healing"
 
+#: Key listing fields whose value was invented or altered under a
+#: quarantine policy. Its presence means the record must be kept out of
+#: the main stream.
+QUARANTINE_KEY = "_quarantine"
+
+#: Provenance actions that mean the emitted value did not arrive in the
+#: payload. A coercion is excluded: '42.5' -> 42.5 preserves the value,
+#: it does not invent one.
+INVENTING_ACTIONS = (
+    "defaulted",
+    "defaulted_blank",
+    "rejected_bool",
+    "clamped_to_min",
+    "clamped_to_max",
+)
+
 #: Bookkeeping keys that are never treated as payload data.
-RESERVED_KEYS = (PROVENANCE_KEY, "_is_duplicate", "_is_duplicate_flag", "duplicate_uuid")
+RESERVED_KEYS = (
+    PROVENANCE_KEY, QUARANTINE_KEY, "_is_duplicate",
+    "_is_duplicate_flag", "duplicate_uuid",
+)
 
 #: Escalation ladder. Attempt N uses STRATEGIES[N - 1].
 STRATEGIES = ("strict", "fuzzy_alias", "defensive")
@@ -50,11 +69,17 @@ _TEMPLATE = '''# Auto-Generated Self-Healing Data Pipeline Parser
 #   - safe defaults for missing or null fields
 #   - clamping of numeric values to their declared valid range
 #   - {extras_note}
+#   - quarantine flagging for: {quarantine_note}
 #
 # Every field this parser touches is recorded under the PROVENANCE_KEY of the
 # returned record, so a downstream consumer can tell a value that genuinely
 # arrived from one this parser invented. Fields absent from that block passed
 # through untouched.
+#
+# Fields under a quarantine policy are listed under QUARANTINE_KEY when their
+# value was invented or altered. The record keeps a valid shape so it can
+# still flow through typed systems, but its presence means the record must
+# NOT be aggregated or treated as a genuine observation.
 
 SCHEMA = {schema!r}
 RANGES = {ranges!r}
@@ -64,6 +89,9 @@ RESERVED_KEYS = {reserved!r}
 PRESERVE_UNKNOWN_FIELDS = {preserve_unknown!r}
 AGGRESSIVE_NUMERIC_RECOVERY = {aggressive!r}
 PROVENANCE_KEY = {provenance_key!r}
+QUARANTINE_KEY = {quarantine_key!r}
+QUARANTINE_FIELDS = {quarantine_fields!r}
+INVENTING_ACTIONS = {inventing_actions!r}
 
 
 def _note(provenance, field, action, original):
@@ -183,6 +211,23 @@ def parse_payload(payload: dict) -> dict:
     if provenance:
         parsed[PROVENANCE_KEY] = provenance
 
+    # 5. Flag the record when a field that cannot tolerate an invented
+    #    value got one. Backfilling an identity or a monetary amount
+    #    produces a row that passes validation and then corrupts every
+    #    aggregate computed over it, so such a record is marked rather
+    #    than quietly emitted as though it were genuine.
+    quarantined = []
+    for field in QUARANTINE_FIELDS:
+        entry = provenance.get(field)
+        if entry is None:
+            continue
+        for action in entry["actions"]:
+            if action in INVENTING_ACTIONS and field not in quarantined:
+                quarantined.append(field)
+
+    if quarantined:
+        parsed[QUARANTINE_KEY] = quarantined
+
     return parsed
 '''
 
@@ -227,6 +272,7 @@ class PatchGenerator:
         attempt: int = 1,
         pipeline_id: str = "weather",
         known_aliases: Optional[Dict[str, str]] = None,
+        quarantine_fields: Optional[Tuple[str, ...]] = None,
     ) -> str:
         """Return executable patch source for this diagnosis.
 
@@ -243,6 +289,8 @@ class PatchGenerator:
                     alias: canonical
                     for canonical, alias in pipeline.field_renames.items()
                 }
+            if quarantine_fields is None:
+                quarantine_fields = pipeline.quarantine_fields()
 
         schema = {
             field: (declared if isinstance(declared, str) else getattr(declared, "__name__", "str"))
@@ -267,6 +315,12 @@ class PatchGenerator:
             if preserve_unknown
             else "unrecognised fields dropped (defensive strategy)"
         )
+        applicable_quarantine = tuple(
+            field for field in (quarantine_fields or ()) if field in schema
+        )
+        quarantine_note = (
+            ", ".join(applicable_quarantine) if applicable_quarantine else "(none)"
+        )
 
         feedback_comment = "#"
         if feedback_context:
@@ -282,12 +336,18 @@ class PatchGenerator:
             anomaly_category=diagnostic.anomaly_category,
             feedback_comment=feedback_comment,
             extras_note=extras_note,
+            quarantine_note=quarantine_note,
             schema=schema,
             ranges=ranges,
             defaults=defaults,
             aliases=aliases,
             reserved=RESERVED_KEYS,
             provenance_key=PROVENANCE_KEY,
+            quarantine_key=QUARANTINE_KEY,
+            quarantine_fields=tuple(
+                field for field in (quarantine_fields or ()) if field in schema
+            ),
+            inventing_actions=INVENTING_ACTIONS,
             preserve_unknown=preserve_unknown,
             aggressive=aggressive,
         )

@@ -126,6 +126,7 @@ def run_pipeline(pipeline_id: str, anomaly: str, use_live_data: bool) -> None:
     state.last_verif = None
     state.last_heal_success = None
     state.healed_payload = None
+    state.quarantined_fields = ()
     state.is_duplicate = is_duplicate
 
     if not detection["is_anomaly"]:
@@ -147,6 +148,7 @@ def run_pipeline(pipeline_id: str, anomaly: str, use_live_data: bool) -> None:
         expected_schema=pipeline.expected_schema,
         valid_ranges=pipeline.valid_ranges,
         known_aliases=known_aliases,
+        quarantine_fields=pipeline.quarantine_fields(),
     )
     state.last_patch = patch_code
     state.last_verif = verification
@@ -156,6 +158,9 @@ def run_pipeline(pipeline_id: str, anomaly: str, use_live_data: bool) -> None:
         # Pass a copy: the parser must not touch the record on display.
         state.healed_payload = components["orchestrator"].parse(
             dict(corrupted), pipeline_id=pipeline_id, is_duplicate=is_duplicate
+        )
+        state.quarantined_fields = components["orchestrator"].quarantined_fields(
+            state.healed_payload
         )
 
 
@@ -245,7 +250,16 @@ def render_live_pipeline(pipeline_id: str, anomaly: str, use_live_data: bool) ->
     with right:
         st.markdown("### Pipeline Output (Post-Heal)")
         if state.get("last_heal_success"):
-            st.success("✅ Cleanly parsed and healed")
+            quarantined = state.get("quarantined_fields") or ()
+            if quarantined:
+                st.warning(
+                    "⚠️ Parsed, but QUARANTINED on "
+                    f"`{'`, `'.join(quarantined)}`. These fields could not "
+                    "tolerate an invented value, so this record must be kept "
+                    "out of aggregates and downstream consumers."
+                )
+            else:
+                st.success("✅ Cleanly parsed and healed")
             st.json(state.healed_payload)
         elif not state.get("last_detection", {}).get("is_anomaly"):
             st.info("ℹ️ Payload normal — clean ingestion")

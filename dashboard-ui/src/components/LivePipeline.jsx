@@ -31,6 +31,10 @@ export default function LivePipeline({ result, loading, selectedPipeline, pipeli
   const isAnomaly = det.is_anomaly;
   const healed = result.heal_success;
   const pipeInfo = result.pipeline_info || {};
+  // Non-empty means the record kept a valid shape but a field that cannot
+  // tolerate an invented value got one, so it must not be aggregated.
+  const quarantined = result.quarantined_fields || [];
+  const isQuarantined = quarantined.length > 0;
 
   return (
     <div className="fade-in">
@@ -60,7 +64,32 @@ export default function LivePipeline({ result, loading, selectedPipeline, pipeli
             {healed === true ? '✓ HEALED' : healed === false ? '✗ FAILED' : '—'}
           </div>
         </div>
+        <div className="metric-card">
+          <div className="metric-card__label">Record Trust</div>
+          <div
+            className={`metric-card__value ${isQuarantined ? 'metric-card__value--amber' : healed ? 'metric-card__value--green' : ''}`}
+          >
+            {isQuarantined ? '⚠ QUARANTINED' : healed ? '✓ USABLE' : '—'}
+          </div>
+        </div>
       </div>
+
+      {isQuarantined && (
+        <div className="quarantine-notice" role="status">
+          <span className="quarantine-notice__icon" aria-hidden="true">⚠</span>
+          <div>
+            <div className="quarantine-notice__title">
+              Record quarantined on {quarantined.map((f) => <code key={f}>{f}</code>).reduce((a, b) => [a, ', ', b])}
+            </div>
+            <div className="quarantine-notice__body">
+              These fields could not tolerate an invented value, so the parser
+              flagged the record instead of passing a fabricated one off as
+              genuine. It keeps a valid shape, but must be kept out of
+              aggregates and downstream consumers.
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Payload comparison */}
       <div className="columns columns--3">
@@ -91,8 +120,11 @@ export default function LivePipeline({ result, loading, selectedPipeline, pipeli
           <div className="glass-card__title">
             <span className="glass-card__title-icon">🔵</span>
             Healed Parser Output
-            {healed && (
+            {healed && !isQuarantined && (
               <span className="badge badge--healed" style={{ marginLeft: 'auto' }}>HEALED</span>
+            )}
+            {healed && isQuarantined && (
+              <span className="badge badge--quarantine" style={{ marginLeft: 'auto' }}>QUARANTINED</span>
             )}
             {healed === false && (
               <span className="badge badge--anomaly" style={{ marginLeft: 'auto' }}>BROKEN</span>

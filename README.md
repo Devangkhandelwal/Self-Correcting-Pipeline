@@ -6,7 +6,7 @@
 [![Flask](https://img.shields.io/badge/Flask-3.0%2B-000000.svg?logo=flask&logoColor=white)](https://flask.palletsprojects.com/)
 [![Google Gemini](https://img.shields.io/badge/Google%20Gemini-2.5%20Flash-4285F4.svg?logo=google&logoColor=white)](https://ai.google.dev/)
 [![Scikit-Learn](https://img.shields.io/badge/Scikit--Learn-1.3%2B-F7931E.svg?logo=scikit-learn&logoColor=white)](https://scikit-learn.org/)
-[![Tests](https://img.shields.io/badge/Tests-208%20passing-brightgreen.svg?logo=pytest&logoColor=white)](https://docs.pytest.org/)
+[![Tests](https://img.shields.io/badge/Tests-242%20passing-brightgreen.svg?logo=pytest&logoColor=white)](https://docs.pytest.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A **self-healing data ingestion agent**. When an upstream provider silently
@@ -189,6 +189,54 @@ needed no healing carries no `_healing` key at all. Actions are
 `coerced_to_str`, `rejected_bool`, `clamped_to_min`, `clamped_to_max` and
 `dropped_unrecognised`.
 
+**Some fields cannot tolerate an invented value at all.** Backfilling a
+measurement is reasonable — a dropped sensor reading is an ordinary
+operational event. Backfilling an *identity* or a *monetary amount* is not: a
+transaction with an empty `transaction_id` and an `amount` of 0.01 passes
+schema validation, reaches the warehouse, and then enters `SUM(amount)` and
+`COUNT(*) GROUP BY merchant_id`. It is not a repaired record; it is a
+corrupted one that now looks valid — which is the exact failure this project
+exists to prevent.
+
+Each pipeline therefore declares a **missing-value policy** per field:
+
+```python
+missing_value_policy={
+    "transaction_id": POLICY_QUARANTINE,   # unjoinable, double-counts in GROUP BY
+    "amount":         POLICY_QUARANTINE,   # corrupts SUM and AVG
+    # currency, risk_score, timestamp -> POLICY_BACKFILL (the default)
+}
+```
+
+When a quarantined field's value is **invented or altered** — defaulted, or
+clamped out of range — the record is flagged:
+
+```json
+{ "transaction_id": "", "amount": 0.01, "currency": "USD",
+  "_quarantine": ["transaction_id", "amount"] }
+```
+
+The record keeps a complete, correctly typed shape, so it still flows through
+typed systems; `_quarantine` means it must be kept out of aggregates and
+downstream consumers. A *coercion* does not quarantine: `"42.5"` → `42.5`
+preserves the value rather than inventing one. Declared policies:
+
+| Pipeline | Quarantined | Backfilled |
+|---|---|---|
+| `weather` | `latitude`, `longitude`, `time` | the five metrics |
+| `finance` | `transaction_id`, `user_id`, `merchant_id`, `amount` | `currency`, `risk_score`, `timestamp` |
+| `ecommerce` | `item_id`, `sku`, `unit_price`, `stock_quantity` | `category`, `reorder_level`, `timestamp` |
+| `iot` | `device_id`, `timestamp` | the five telemetry channels |
+
+Weather location is quarantined because `0.0, 0.0` is a real point in the Gulf
+of Guinea — the "null island" artefact that shows up in any geospatial dataset
+with backfilled coordinates.
+
+`GET /api/pipelines` publishes each policy, `POST /api/run-pipeline` returns
+`quarantined_fields`, and both dashboards show an amber state — deliberately
+not green or red, because the heal succeeded while the record stayed
+untrustworthy.
+
 Duplicate records are the one case a generated parser cannot handle: it sees
 one record at a time and cannot know about a repeat. Detection owns that
 state, and `parse(..., is_duplicate=True)` records its verdict as
@@ -271,7 +319,7 @@ without binding a port.
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/health` | readiness; reports `model_loaded`, `llm_enabled`, active parsers |
-| `GET /api/pipelines` | all registered pipelines with schema and ranges |
+| `GET /api/pipelines` | all registered pipelines with schema, ranges and quarantine policy |
 | `GET /api/anomaly-classes` | supported anomaly classes |
 | `GET /api/schema?pipeline_id=weather` | one pipeline's schema and ranges |
 | `POST /api/run-pipeline` | full detect → diagnose → heal cycle |
@@ -488,7 +536,7 @@ container or VM with seccomp and no network.
 │   │   ├── dedup.py           # content-fingerprint duplicate tracker
 │   │   ├── generate_data.py   # seeded generation; standard & hard difficulty
 │   │   ├── injector.py        # anomaly injection (seedable RNG)
-│   │   └── pipeline_registry.py  # single source of truth for all schemas
+│   │   └── pipeline_registry.py  # schemas, ranges, renames, missing-value policy
 │   ├── layer1_detector/
 │   │   ├── feature_extractor.py  # 11-feature vectoriser
 │   │   ├── model.py           # classifier wrapper + rule baseline
@@ -505,7 +553,7 @@ container or VM with seccomp and no network.
 │       ├── config.py          # all configuration, read from env
 │       └── logger.py          # rotating logs + JSONL audit trail
 │
-└── tests/                     # 208 tests
+└── tests/                     # 242 tests
     ├── test_api_validation.py      # request validation, bounds, health
     ├── test_dedup.py               # fingerprinting, tracker, replay injection
     ├── test_e2e_pipeline.py        # end-to-end weather cycle
@@ -515,6 +563,7 @@ container or VM with seccomp and no network.
     ├── test_multidomain_healing.py # every rename pair; every anomaly x pipeline
     ├── test_outlier_healing.py     # range-driven diagnosis + clamping
     ├── test_provenance.py          # healed records disclose what changed
+    ├── test_quarantine.py          # per-field missing-value policy
     ├── test_sandbox_security.py    # allowlist screening; timeout enforced
     └── test_value_compatibility.py # rename inference beyond name similarity
 ```
@@ -620,7 +669,12 @@ the ingestion stage rather than a deployment knob.
 pytest tests/ -v
 ```
 
-208 tests, roughly 65 seconds. What they cover:
+242 tests, roughly 28 seconds. The suite runs **entirely offline**: a
+`conftest.py` fixture serves the weather pipeline from its cached baseline, so
+no test depends on Open-Meteo being reachable. Before that fixture, live HTTP
+dominated the runtime and made the suite fail without a network connection.
+
+What they cover:
 
 ```text
 tests/test_api_validation.py ..........                          [  4%]
@@ -631,11 +685,12 @@ tests/test_injector.py .                                         [ 17%]
 tests/test_layer1.py ..                                          [ 18%]
 tests/test_multidomain_healing.py ..........................     [ 30%]
 tests/test_outlier_healing.py ............                       [ 36%]
-tests/test_provenance.py .........                               [ 40%]
-tests/test_sandbox_security.py ........................................ [ 59%]
+tests/test_provenance.py .........                               [ 35%]
+tests/test_quarantine.py ................................        [ 48%]
+tests/test_sandbox_security.py ........................................ [ 65%]
 tests/test_value_compatibility.py .....................................[100%]
 
-============================= 208 passed in ~65s ==============================
+============================= 242 passed in ~28s ==============================
 ```
 
 The suite deliberately enumerates **every declared rename pair** rather than
@@ -674,11 +729,16 @@ Honest about what this does not do:
   last 2048 fingerprints, so a duplicate separated from its original by more
   than that is missed — the normal trade for streaming deduplication. It also
   cannot see a repeat across process restarts, since the memory is in-process.
-- **Defaults are still invented values.** A backfilled field gets a
-  schema-safe default (`0.01` for finance `amount`, clamped into range).
-  Healing keeps the pipeline flowing; it does not recover data that never
-  arrived. The `_healing` block now makes this visible downstream, but it does
-  not make the value real.
+- **Backfilled measurements are still invented values.** Fields under
+  `POLICY_BACKFILL` get a schema-safe default and flow on, disclosed via
+  `_healing` but not quarantined. That is a judgement call: a dropped sensor
+  reading is an ordinary event, and quarantining every one of them would stop
+  the pipeline for routine gaps. It does mean an averaged metric can still
+  include substituted values, so a consumer computing statistics should filter
+  on `_healing` as well as `_quarantine`.
+- **Quarantine is advisory, not enforced.** The record is annotated and
+  returned; routing it to a dead-letter path is the caller's job. A stricter
+  design would have the orchestrator withhold it from the main stream.
 - **The AST screen is a denylist, not a capability sandbox.** See
   [Security Model](#-security-model).
 - **Three of four pipelines are simulated.** Only `weather` hits a real API,

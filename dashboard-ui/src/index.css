@@ -1068,3 +1068,63 @@ body {
     flex-wrap: wrap;
   }
 }
+
+
+/* ============================================
+   QUARANTINE
+   A record that kept a valid shape but whose value was invented for a field
+   that cannot tolerate one. Deliberately amber, not green or red: the heal
+   succeeded, but the record is not trustworthy.
+   ============================================ */
+
+.badge--quarantine {
+  color: #fbbf24;
+  background: rgba(245, 158, 11, 0.14);
+  border: 1px solid rgba(251, 191, 36, 0.38);
+}
+
+.metric-card__value--amber {
+  color: #fbbf24;
+}
+
+.quarantine-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  margin: 0 0 20px;
+  padding: 16px 20px;
+  border: 1px solid rgba(251, 191, 36, 0.32);
+  border-left: 3px solid #f59e0b;
+  border-radius: var(--radius-md);
+  background: rgba(245, 158, 11, 0.09);
+}
+
+.quarantine-notice__icon {
+  flex: 0 0 auto;
+  font-size: 1.3rem;
+  line-height: 1.2;
+  color: #fbbf24;
+}
+
+.quarantine-notice__title {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: #fbbf24;
+}
+
+.quarantine-notice__title code {
+  padding: 1px 6px;
+  margin: 0 1px;
+  border-radius: 4px;
+  background: rgba(3, 7, 18, 0.45);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 0.86em;
+}
+
+.quarantine-notice__body {
+  margin-top: 5px;
+  max-width: 80ch;
+  font-size: 0.85rem;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}

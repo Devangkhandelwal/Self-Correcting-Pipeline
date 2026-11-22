@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from src.layer2_diagnostician.agent import DiagnosticReport
-from src.layer3_patcher.generator import PatchGenerator
+from src.layer3_patcher.generator import QUARANTINE_KEY, PatchGenerator
 from src.layer3_patcher.sandbox import (
     PatchValidationError,
     SandboxedVerifier,
@@ -54,7 +54,8 @@ class SelfHealingOrchestrator:
         expected_schema: Optional[Dict[str, Any]],
         valid_ranges: Optional[Dict[str, tuple]],
         known_aliases: Optional[Dict[str, str]] = None,
-    ) -> Tuple[Dict[str, str], Dict[str, tuple], Dict[str, str]]:
+        quarantine_fields: Optional[Tuple[str, ...]] = None,
+    ) -> Tuple[Dict[str, str], Dict[str, tuple], Dict[str, str], Tuple[str, ...]]:
         """Return (schema_spec, valid_ranges, known_aliases) for a pipeline.
 
         Anything the caller does not supply is looked up in the registry, so
@@ -84,7 +85,10 @@ class SelfHealingOrchestrator:
                 if pipeline else {}
             )
 
-        return schema_spec, valid_ranges, known_aliases
+        if quarantine_fields is None:
+            quarantine_fields = pipeline.quarantine_fields() if pipeline else ()
+
+        return schema_spec, valid_ranges, known_aliases, quarantine_fields
 
     # -- healing loop --------------------------------------------------------
 
@@ -96,13 +100,15 @@ class SelfHealingOrchestrator:
         expected_schema: Optional[Dict[str, Any]] = None,
         valid_ranges: Optional[Dict[str, tuple]] = None,
         known_aliases: Optional[Dict[str, str]] = None,
+        quarantine_fields: Optional[Tuple[str, ...]] = None,
     ) -> Tuple[bool, str, Dict[str, Any]]:
         """Generate, verify and activate a patch for a diagnosed failure.
 
         Returns (success, patch_code, verification_report).
         """
-        schema_spec, ranges, aliases = self._resolve_contract(
-            pipeline_id, expected_schema, valid_ranges, known_aliases
+        schema_spec, ranges, aliases, quarantine = self._resolve_contract(
+            pipeline_id, expected_schema, valid_ranges, known_aliases,
+            quarantine_fields,
         )
         test_batch = self._build_test_batch(failing_payload, pipeline_id)
 
@@ -126,6 +132,7 @@ class SelfHealingOrchestrator:
                 attempt=attempt,
                 pipeline_id=pipeline_id,
                 known_aliases=aliases,
+                quarantine_fields=quarantine,
             )
             last_patch_code = patch_code
 
@@ -306,3 +313,16 @@ class SelfHealingOrchestrator:
 
     def has_active_parser(self, pipeline_id: str) -> bool:
         return pipeline_id in self.active_parsers
+
+    @staticmethod
+    def quarantined_fields(record: dict) -> Tuple[str, ...]:
+        """Fields whose invented value taints this record, if any.
+
+        A non-empty result means the record kept a valid shape but must
+        not be aggregated or treated as a genuine observation.
+        """
+        return tuple(record.get(QUARANTINE_KEY) or ())
+
+    @classmethod
+    def is_quarantined(cls, record: dict) -> bool:
+        return bool(cls.quarantined_fields(record))

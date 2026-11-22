@@ -23,7 +23,8 @@ from typing import Any, Dict, Iterable, Optional
 
 #: Keys excluded from a fingerprint: annotations, not data.
 EXCLUDED_KEYS = frozenset({
-    "_healing", "_is_duplicate", "_is_duplicate_flag", "duplicate_uuid", "_source",
+    "_healing", "_quarantine", "_is_duplicate", "_is_duplicate_flag",
+    "duplicate_uuid", "_source",
 })
 
 DEFAULT_CAPACITY = 2048
