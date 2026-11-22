@@ -27,8 +27,11 @@ from src.utils import config
 
 NUMERIC_TYPES = {"float", "int"}
 
-#: Injector markers that identify a replayed record; normalised, not preserved.
-DUPLICATE_MARKERS = ("_is_duplicate_flag", "duplicate_uuid")
+#: Key under which the generated parser records what it changed.
+PROVENANCE_KEY = "_healing"
+
+#: Bookkeeping keys that are never treated as payload data.
+RESERVED_KEYS = (PROVENANCE_KEY, "_is_duplicate", "_is_duplicate_flag", "duplicate_uuid")
 
 #: Escalation ladder. Attempt N uses STRATEGIES[N - 1].
 STRATEGIES = ("strict", "fuzzy_alias", "defensive")
@@ -46,16 +49,33 @@ _TEMPLATE = '''# Auto-Generated Self-Healing Data Pipeline Parser
 #   - type coercion against the declared schema
 #   - safe defaults for missing or null fields
 #   - clamping of numeric values to their declared valid range
-#   - duplicate-marker normalisation
 #   - {extras_note}
+#
+# Every field this parser touches is recorded under the PROVENANCE_KEY of the
+# returned record, so a downstream consumer can tell a value that genuinely
+# arrived from one this parser invented. Fields absent from that block passed
+# through untouched.
 
 SCHEMA = {schema!r}
 RANGES = {ranges!r}
 DEFAULTS = {defaults!r}
 ALIASES = {aliases!r}
-DUPLICATE_MARKERS = {markers!r}
+RESERVED_KEYS = {reserved!r}
 PRESERVE_UNKNOWN_FIELDS = {preserve_unknown!r}
 AGGRESSIVE_NUMERIC_RECOVERY = {aggressive!r}
+PROVENANCE_KEY = {provenance_key!r}
+
+
+def _note(provenance, field, action, original):
+    """Record that `field` was altered, and what it held beforehand."""
+    entry = provenance.get(field)
+    if entry is None:
+        entry = {{"actions": [], "original": original}}
+        provenance[field] = entry
+    entry["actions"].append(action)
+    if entry["original"] is None and original is not None:
+        entry["original"] = original
+    return provenance
 
 
 def _salvage_number(text, default):
@@ -105,41 +125,63 @@ def parse_payload(payload: dict) -> dict:
     """
     source = dict(payload)
     parsed = {{}}
+    provenance = {{}}
 
     # 1. Recover fields the upstream provider renamed.
     for alias, canonical in ALIASES.items():
         if canonical not in source and alias in source:
             source[canonical] = source.pop(alias)
+            _note(provenance, canonical, "aliased_from:" + alias, None)
 
     # 2. Coerce, default and clamp every declared field.
     for field, declared in SCHEMA.items():
         default = DEFAULTS[field]
         value = source.get(field)
+        missing = field not in source or value is None
 
         if declared == "str":
+            if missing:
+                _note(provenance, field, "defaulted", None)
+            elif not isinstance(value, str):
+                _note(provenance, field, "coerced_to_str", value)
+            elif not value.strip():
+                _note(provenance, field, "defaulted_blank", value)
             parsed[field] = _to_text(value, default)
             continue
+
+        if missing:
+            _note(provenance, field, "defaulted", None)
+        elif isinstance(value, bool):
+            _note(provenance, field, "rejected_bool", value)
+        elif not isinstance(value, (int, float)):
+            _note(provenance, field, "coerced_to_number", value)
 
         number = _to_number(value, default)
         bounds = RANGES.get(field)
         if bounds is not None:
             if number < bounds[0]:
+                _note(provenance, field, "clamped_to_min", number)
                 number = bounds[0]
             elif number > bounds[1]:
+                _note(provenance, field, "clamped_to_max", number)
                 number = bounds[1]
         parsed[field] = number
 
-    # 3. Normalise duplicate markers into a single flag.
-    for marker in DUPLICATE_MARKERS:
-        if marker in source:
-            parsed["_is_duplicate"] = True
-
-    # 4. Carry through fields the schema does not describe, so healing never
+    # 3. Carry through fields the schema does not describe, so healing never
     #    silently drops data it simply did not recognise.
     if PRESERVE_UNKNOWN_FIELDS:
         for key, value in source.items():
-            if key not in parsed and key not in DUPLICATE_MARKERS:
+            if key not in parsed and key not in RESERVED_KEYS:
                 parsed[key] = value
+    else:
+        for key in source:
+            if key not in SCHEMA and key not in RESERVED_KEYS:
+                _note(provenance, key, "dropped_unrecognised", source[key])
+
+    # 4. Attach provenance only when something was actually altered, so a
+    #    clean record stays byte-identical to its input.
+    if provenance:
+        parsed[PROVENANCE_KEY] = provenance
 
     return parsed
 '''
@@ -244,7 +286,8 @@ class PatchGenerator:
             ranges=ranges,
             defaults=defaults,
             aliases=aliases,
-            markers=DUPLICATE_MARKERS,
+            reserved=RESERVED_KEYS,
+            provenance_key=PROVENANCE_KEY,
             preserve_unknown=preserve_unknown,
             aggressive=aggressive,
         )
@@ -288,7 +331,7 @@ class PatchGenerator:
         missing = [field for field in schema if field not in observed]
         unclaimed = [
             key for key in observed
-            if key not in schema and key not in aliases and key not in DUPLICATE_MARKERS
+            if key not in schema and key not in aliases and key not in RESERVED_KEYS
         ]
 
         for field in missing:

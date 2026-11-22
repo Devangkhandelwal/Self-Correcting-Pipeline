@@ -274,19 +274,35 @@ class SelfHealingOrchestrator:
 
     # -- runtime -------------------------------------------------------------
 
-    def parse(self, raw_payload: dict, pipeline_id: str = "weather") -> dict:
-        """Parse a record with the active healed parser, if one is bound."""
+    def parse(
+        self,
+        raw_payload: dict,
+        pipeline_id: str = "weather",
+        is_duplicate: bool = False,
+    ) -> dict:
+        """Parse a record with the active healed parser, if one is bound.
+
+        `is_duplicate` carries the Layer 1 verdict into the output. The
+        parser cannot determine this itself: deduplication needs state
+        across records and a generated `parse_payload` sees exactly one.
+        Detection owns that state; this records its finding.
+        """
         parser = self.active_parsers.get(pipeline_id)
         if parser is None:
-            return dict(raw_payload)
-        try:
-            return parser(dict(raw_payload))
-        except Exception as exc:
-            logger.warning(
-                "Active parser for '%s' raised %s: %s; returning record unchanged.",
-                pipeline_id, type(exc).__name__, exc,
-            )
-            return dict(raw_payload)
+            parsed = dict(raw_payload)
+        else:
+            try:
+                parsed = parser(dict(raw_payload))
+            except Exception as exc:
+                logger.warning(
+                    "Active parser for '%s' raised %s: %s; returning record unchanged.",
+                    pipeline_id, type(exc).__name__, exc,
+                )
+                parsed = dict(raw_payload)
+
+        if is_duplicate:
+            parsed["_is_duplicate"] = True
+        return parsed
 
     def has_active_parser(self, pipeline_id: str) -> bool:
         return pipeline_id in self.active_parsers
