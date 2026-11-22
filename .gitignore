@@ -54,6 +54,15 @@ yarn-error.log*
 .env.production
 !.env.example
 
+# Build artifacts: regenerate with `python run_data_and_train.py`
+data/synthetic/
+data/heldout/
+data/model.joblib
+data/train_test_split.json
+
+# Parsers synthesised at runtime by Layer 3
+data/patches/
+
 # Runtime Logs (Preserve directory structure via .gitkeep)
 logs/*.jsonl
 logs/*.log
