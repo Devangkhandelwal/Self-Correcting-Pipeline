@@ -6,9 +6,12 @@ screening, no import restriction, no timeout, no resource limits -- while the
 README advertised an "AST-sandboxed execution harness". This module provides
 the two layers that were missing:
 
-  1. `validate_patch_source` screens the source with the `ast` module and
-     rejects imports, dynamic evaluation, filesystem access, dunder traversal
-     and a denylist of dangerous builtins before anything runs.
+  1. `validate_patch_source` screens the source with the `ast` module
+     against an *allowlist* of permitted node types, so unknown syntax is
+     rejected by default rather than permitted by omission, plus a denylist
+     of dangerous builtin names (which allowlisting cannot cover, since
+     `eval(...)` is syntactically an ordinary call) and a block on dunder
+     attribute traversal.
   2. `SandboxedVerifier.verify_patch` runs the screened patch in a separate,
      isolated interpreter under a wall-clock timeout, so a hostile or merely
      broken patch cannot corrupt or hang the parent process.
@@ -35,18 +38,75 @@ from src.utils.logger import log_audit_event, logger
 _RUNNER = Path(__file__).resolve().parent / "_sandbox_runner.py"
 
 #: Builtins a generated parser has no legitimate reason to call.
+#: Node allowlisting does not cover these: `Call` and `Name` are both
+#: permitted, so `eval(...)` is syntactically ordinary and must be named.
 FORBIDDEN_NAMES = frozenset({
     "eval", "exec", "compile", "open", "input", "__import__", "breakpoint",
     "globals", "locals", "vars", "dir", "getattr", "setattr", "delattr",
     "help", "memoryview", "exit", "quit", "object", "type", "super",
+    "classmethod", "staticmethod", "property", "frozenset", "bytearray",
 })
 
-#: Syntax forms that have no place in a parser patch.
-FORBIDDEN_NODES = (
-    ast.Import, ast.ImportFrom, ast.Global, ast.Nonlocal,
-    ast.AsyncFunctionDef, ast.Await, ast.AsyncFor, ast.AsyncWith,
-    ast.Yield, ast.YieldFrom, ast.ClassDef, ast.With, ast.Lambda,
-)
+#: AST node types a parser patch may contain. Anything absent is rejected.
+#:
+#: This is an allowlist by design. A denylist fails open -- every Python
+#: release adds syntax, so the set of forms to forbid is open-ended, and the
+#: previous denylist silently permitted walrus assignments, match statements,
+#: starred unpacking and comprehension scopes. An allowlist fails closed.
+#:
+#: The core set was measured, not guessed: 432 patches generated across every
+#: pipeline, strategy and anomaly category use exactly these 39 node types.
+ALLOWED_NODES = frozenset({
+    # -- module and function structure
+    "Module", "FunctionDef", "arguments", "arg", "Return",
+    # -- statements
+    "Assign", "AugAssign", "AnnAssign", "Expr", "If", "For", "Try",
+    "ExceptHandler", "Pass", "Continue", "Break",
+    # -- expressions
+    "Call", "keyword", "Attribute", "Subscript", "Name", "Constant",
+    "IfExp", "BoolOp", "UnaryOp", "BinOp", "Compare",
+    # -- literals
+    "Dict", "List", "Tuple", "Set",
+    # -- expression contexts
+    "Load", "Store",
+    # -- boolean / unary operators
+    "And", "Or", "Not", "USub", "UAdd",
+    # -- arithmetic (Add is used for string concatenation in the template)
+    "Add", "Sub", "Mult", "Div", "FloorDiv", "Mod",
+    # -- comparisons
+    "Eq", "NotEq", "Lt", "LtE", "Gt", "GtE", "Is", "IsNot", "In", "NotIn",
+})
+
+#: Rejected regardless of the allowlist, for a clearer error message than
+#: "disallowed syntax". These are the forms most often reached for in a
+#: sandbox escape, so naming them explicitly aids debugging a bad patch.
+NAMED_REJECTIONS = {
+    "Import": "imports are not permitted in a parser patch",
+    "ImportFrom": "imports are not permitted in a parser patch",
+    "ClassDef": "class definitions are not permitted",
+    "Lambda": "lambdas are not permitted; define parse_payload normally",
+    "With": "context managers are not permitted",
+    "Global": "global statements are not permitted",
+    "Nonlocal": "nonlocal statements are not permitted",
+    "NamedExpr": "assignment expressions (:=) are not permitted",
+    "Starred": "starred unpacking is not permitted",
+    "Delete": "del statements are not permitted",
+    "Raise": "raising exceptions is not permitted",
+    "Assert": "assert statements are not permitted",
+    "Match": "match statements are not permitted",
+    "Await": "await is not permitted",
+    "Yield": "generators are not permitted",
+    "YieldFrom": "generators are not permitted",
+    "AsyncFunctionDef": "async functions are not permitted",
+    "AsyncFor": "async iteration is not permitted",
+    "AsyncWith": "async context managers are not permitted",
+    "ListComp": "comprehensions are not permitted; use an explicit loop",
+    "SetComp": "comprehensions are not permitted; use an explicit loop",
+    "DictComp": "comprehensions are not permitted; use an explicit loop",
+    "GeneratorExp": "generator expressions are not permitted",
+    "JoinedStr": "f-strings are not permitted",
+    "FormattedValue": "f-strings are not permitted",
+}
 
 ENTRYPOINT = "parse_payload"
 
@@ -78,25 +138,63 @@ def validate_patch_source(source: str) -> ast.Module:
             f"Patch source must define a top-level '{ENTRYPOINT}' function"
         )
 
+    # Structural invariants. The module is executed on import when a verified
+    # patch is activated, so the top level must hold nothing but constant
+    # tables and function definitions -- never statements that do work.
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.Assign)):
+            continue
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
+            continue  # module docstring
+        raise PatchValidationError(
+            "Patch top level may contain only constants and function "
+            f"definitions, found {type(node).__name__}"
+        )
+
     for node in ast.walk(tree):
-        if isinstance(node, FORBIDDEN_NODES):
+        # A decorator could rewrap the entrypoint. It would be screened too,
+        # so this is not an escape, but the entrypoint must be the plain
+        # function the sandbox believes it is calling.
+        if isinstance(node, ast.FunctionDef) and node.decorator_list:
             raise PatchValidationError(
-                f"Disallowed syntax in patch: {type(node).__name__}"
+                f"Decorators are not permitted on '{node.name}'"
             )
+
+    # Function definitions must be top level: a nested def creates a closure
+    # over state the screen reasons about less easily, and the template has
+    # no need for one.
+    top_level_functions = {
+        id(node) for node in tree.body if isinstance(node, ast.FunctionDef)
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and id(node) not in top_level_functions:
+            raise PatchValidationError(
+                f"Nested function definitions are not permitted ('{node.name}')"
+            )
+
+    for node in ast.walk(tree):
+        node_type = type(node).__name__
+
+        # Allowlist first: unknown syntax is rejected by default, so a future
+        # Python release cannot quietly widen what a patch may contain.
+        if node_type not in ALLOWED_NODES:
+            reason = NAMED_REJECTIONS.get(
+                node_type, f"{node_type} is not in the permitted syntax subset"
+            )
+            raise PatchValidationError(f"Disallowed syntax in patch: {reason}")
 
         # Block dunder traversal, e.g. {}.__class__.__bases__ sandbox escapes.
         if isinstance(node, ast.Attribute) and node.attr.startswith("__"):
             raise PatchValidationError(
                 f"Disallowed attribute access in patch: .{node.attr}"
             )
-        if isinstance(node, ast.Name) and node.id.startswith("__"):
-            raise PatchValidationError(
-                f"Disallowed identifier in patch: {node.id}"
-            )
-        if isinstance(node, ast.Name) and node.id in FORBIDDEN_NAMES:
-            raise PatchValidationError(
-                f"Disallowed name in patch: {node.id}"
-            )
+        if isinstance(node, ast.Name):
+            if node.id.startswith("__"):
+                raise PatchValidationError(
+                    f"Disallowed identifier in patch: {node.id}"
+                )
+            if node.id in FORBIDDEN_NAMES:
+                raise PatchValidationError(f"Disallowed name in patch: {node.id}")
 
     return tree
 
