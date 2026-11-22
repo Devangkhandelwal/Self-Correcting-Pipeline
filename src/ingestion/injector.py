@@ -6,12 +6,21 @@ simulate live upstream failures.
 Changes from the previous version: the injector accepts an injectable RNG so
 dataset generation is reproducible, no longer mutates shared default state,
 and skips its own bookkeeping keys when choosing a field to corrupt.
+
+`duplicate_record` now emits a genuine replay of a previously emitted
+record instead of adding `_is_duplicate_flag` and `duplicate_uuid` marker
+keys. Those markers made the benchmark circular: the feature extractor's
+`duplicate_flag` was set by their presence, so for that class the feature
+was the label. Detection is now content-based (see src/ingestion/dedup.py),
+which also means a duplicate is only recognisable in the context of the
+stream it repeats -- never from a single record in isolation.
 """
 from __future__ import annotations
 
 import copy
 import random
-from typing import Any, Dict, Optional, Tuple
+from collections import defaultdict, deque
+from typing import Any, Deque, Dict, FrozenSet, Optional, Tuple
 
 ANOMALY_CLASSES = (
     "normal",
@@ -30,15 +39,29 @@ DEFAULT_FIELD_RENAMES = {
     "wind_speed_10m": "wind_speed",
 }
 
-#: Keys the injector itself adds; never chosen as a corruption target.
-RESERVED_KEYS = ("_is_duplicate_flag", "duplicate_uuid")
+#: Bookkeeping keys that are never chosen as a corruption target.
+RESERVED_KEYS = ("_healing", "_is_duplicate", "_is_duplicate_flag", "duplicate_uuid")
+
+#: How many recently emitted records are available to replay.
+REPLAY_HISTORY = 64
 
 
 class SyntheticAnomalyInjector:
     """Corrupts clean API payloads into labelled anomalous records."""
 
-    def __init__(self, rng: Optional[random.Random] = None):
+    def __init__(
+        self,
+        rng: Optional[random.Random] = None,
+        history_size: int = REPLAY_HISTORY,
+    ):
         self.rng = rng or random.Random()
+        self._history_size = history_size
+        # Recently emitted records, bucketed by their key signature, so
+        # duplicate_record replays a record from the *same* stream. One
+        # shared history let a finance request replay a weather record.
+        self._history: Dict[FrozenSet[str], Deque[Dict[str, Any]]] = defaultdict(
+            lambda: deque(maxlen=history_size)
+        )
 
     def _candidate_fields(self, payload: Dict[str, Any]) -> list:
         return [
@@ -90,8 +113,30 @@ class SyntheticAnomalyInjector:
                 f"Valid types: {', '.join(ANOMALY_CLASSES)}"
             )
 
+        if target_anomaly == "duplicate_record":
+            corrupted, metadata = self._replay_previous(corrupted, metadata)
+            return corrupted, target_anomaly, metadata
+
         handler(corrupted, metadata, renames, valid_ranges or {})
+
+        # Only records emitted uncorrupted enter the replay history. Replaying
+        # a drifted or clamped record would label it `duplicate_record` while
+        # its content also carries another anomaly, making the training signal
+        # ambiguous; a replay of a clean record is unambiguously a duplicate.
+        if target_anomaly == "normal":
+            self._remember(corrupted)
+
         return corrupted, target_anomaly, metadata
+
+    @staticmethod
+    def _signature(payload: Dict[str, Any]) -> FrozenSet[str]:
+        """Key set identifying which stream a record belongs to."""
+        return frozenset(
+            key for key in payload if key not in RESERVED_KEYS
+        )
+
+    def _remember(self, payload: Dict[str, Any]) -> None:
+        self._history[self._signature(payload)].append(copy.deepcopy(payload))
 
     # -- individual injectors ------------------------------------------------
 
@@ -166,6 +211,27 @@ class SyntheticAnomalyInjector:
         metadata["outlier_val"] = corrupted[field]
 
     def _inject_duplicate(self, corrupted, metadata, renames, valid_ranges) -> None:
-        corrupted["_is_duplicate_flag"] = True
-        corrupted["duplicate_uuid"] = f"DUP-{self.rng.randint(10000, 99999)}"
-        metadata["action"] = "duplicate_inserted"
+        """Unused: duplicate_record is handled by _replay_previous.
+
+        Kept so the handler table stays exhaustive over ANOMALY_CLASSES.
+        """
+
+    def _replay_previous(self, corrupted, metadata):
+        """Emit a verbatim copy of an earlier record.
+
+        Returns (payload, metadata). When no history exists yet there is
+        nothing to replay, and the metadata says so rather than silently
+        returning a record that is not actually a duplicate -- a caller
+        that needs a detectable duplicate must register the original with
+        the detector first (see MLAnomalyDetector.observe).
+        """
+        bucket = self._history.get(self._signature(corrupted))
+        if not bucket:
+            metadata["action"] = "no_history_to_replay"
+            metadata["replayed"] = False
+            return corrupted, metadata
+
+        source = self.rng.choice(list(bucket))
+        metadata["action"] = "replayed_previous_record"
+        metadata["replayed"] = True
+        return copy.deepcopy(source), metadata

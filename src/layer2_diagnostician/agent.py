@@ -86,8 +86,13 @@ class LLMDiagnosticAgent:
                     type(exc).__name__, exc,
                 )
 
+        # Duplicate detection is content-based and stateful, so the verdict
+        # comes from Layer 1 rather than from marker keys in the payload.
+        is_duplicate = bool(
+            layer1_result.get("features", {}).get("duplicate_flag", 0.0)
+        )
         report = self._fallback_reasoning_engine(
-            failing_payload, expected_schema, category, ranges, aliases
+            failing_payload, expected_schema, category, ranges, aliases, is_duplicate
         )
         log_audit_event("LAYER2_DIAGNOSIS", {**report.model_dump(), "source": "deterministic"})
         return report
@@ -180,6 +185,7 @@ Respond STRICTLY with valid JSON matching this schema:
         category: str,
         valid_ranges: Dict[str, Tuple[float, float]],
         known_aliases: Dict[str, str],
+        is_duplicate: bool = False,
     ) -> DiagnosticReport:
         """Rule-based diagnosis, dispatched on the predicted category.
 
@@ -192,7 +198,7 @@ Respond STRICTLY with valid JSON matching this schema:
             "type_mismatch": lambda: self._detect_type_mismatch(payload, schema),
             "outlier": lambda: self._detect_outlier(payload, schema, valid_ranges),
             "null_field": lambda: self._detect_missing_or_null(payload, schema),
-            "duplicate_record": lambda: self._detect_duplicate(payload),
+            "duplicate_record": lambda: self._detect_duplicate(payload, is_duplicate),
         }
 
         order = ([category] if category in detectors else []) + [
@@ -377,18 +383,33 @@ Respond STRICTLY with valid JSON matching this schema:
         return None
 
     @staticmethod
-    def _detect_duplicate(payload: dict) -> Optional[DiagnosticReport]:
-        markers = [key for key in ("_is_duplicate_flag", "duplicate_uuid") if key in payload]
-        if not markers:
+    def _detect_duplicate(
+        payload: dict, is_duplicate: bool = False
+    ) -> Optional[DiagnosticReport]:
+        """Report a replayed record.
+
+        Driven by the content-fingerprint verdict from Layer 1. Legacy
+        marker keys are still honoured so a dataset generated before
+        content-based deduplication still diagnoses correctly.
+        """
+        legacy = [k for k in ("_is_duplicate_flag", "duplicate_uuid") if k in payload]
+        if not is_duplicate and not legacy:
             return None
+
+        evidence = (
+            "its content fingerprint matches a record already seen in this stream"
+            if is_duplicate
+            else f"it carries legacy duplicate markers ({', '.join(legacy)})"
+        )
         return DiagnosticReport(
-            cause="Duplicate payload record detected in the ingestion stream "
-                  f"(markers: {', '.join(markers)}).",
-            affected_field=markers[0],
+            cause=f"Duplicate record detected in the ingestion stream: {evidence}.",
+            affected_field=legacy[0] if legacy else "_is_duplicate",
             anomaly_category="duplicate_record",
             expected_type="unique_record",
             actual_type="duplicate",
             found_replacement_key=None,
-            suggested_fix="Normalise duplicate markers into a single flag so downstream "
-                          "consumers can deduplicate on it.",
+            suggested_fix="Drop the record, or flag it so downstream consumers can "
+                          "deduplicate. A stateless parser cannot do this: "
+                          "deduplication needs stream state and belongs in the "
+                          "ingestion filter.",
         )

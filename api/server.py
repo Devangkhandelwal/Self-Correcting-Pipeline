@@ -26,6 +26,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+from src.ingestion.dedup import DuplicateTracker
 from src.ingestion.injector import ANOMALY_CLASSES, SyntheticAnomalyInjector
 from src.ingestion.pipeline_registry import registry
 from src.layer1_detector.evaluator import evaluate_layer1
@@ -146,10 +147,23 @@ def create_app() -> Flask:
                 field_renames=pipeline.field_renames,
                 valid_ranges=pipeline.valid_ranges,
             )
+
+            # Each request simulates one isolated stream event, so it gets
+            # its own duplicate tracker. Sharing the detector's long-lived
+            # tracker across requests meant a second `normal` weather run
+            # was reported as a duplicate -- correct for a real stream,
+            # since the upstream returns the same observation for an hour,
+            # but wrong for an endpoint whose requests are independent.
+            request_tracker = DuplicateTracker()
+            if label == "duplicate_record":
+                # By definition this content arrived earlier in the stream.
+                request_tracker.observe(corrupted)
+
             detection = detector.detect(
                 corrupted,
                 expected_fields=pipeline.expected_schema,
                 valid_ranges=pipeline.valid_ranges,
+                duplicate_tracker=request_tracker,
             )
         except Exception as exc:
             logger.exception("Pipeline run failed during ingestion/detection")
@@ -174,6 +188,11 @@ def create_app() -> Flask:
             "healed_payload": None,
             "heal_success": None,
         }
+
+        is_duplicate = bool(
+            detection.get("features", {}).get("duplicate_flag", 0.0)
+        )
+        result["is_duplicate"] = is_duplicate
 
         if not detection["is_anomaly"]:
             return jsonify(result)
@@ -207,7 +226,9 @@ def create_app() -> Flask:
 
             if success:
                 result["healed_payload"] = orchestrator.parse(
-                    corrupted, pipeline_id=pipeline.pipeline_id
+                    corrupted,
+                    pipeline_id=pipeline.pipeline_id,
+                    is_duplicate=is_duplicate,
                 )
         except Exception as exc:
             logger.exception("Pipeline run failed during diagnosis/healing")

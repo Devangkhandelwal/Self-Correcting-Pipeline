@@ -13,8 +13,10 @@ import difflib
 import json
 from typing import Any, Dict, List, Optional, Tuple
 
-#: Keys the injector adds to mark a replayed record.
-DUPLICATE_MARKER_KEYS = ("_is_duplicate_flag", "duplicate_uuid")
+#: Legacy injector markers. Retained only so a dataset generated before
+#: content-based deduplication still extracts sensibly; the injector no
+#: longer produces them.
+LEGACY_DUPLICATE_MARKERS = ("_is_duplicate_flag", "duplicate_uuid")
 
 _DEFAULTS_CACHE: Optional[Tuple[Dict[str, type], Dict[str, tuple]]] = None
 
@@ -63,8 +65,15 @@ class FeatureExtractor:
         payload: Dict[str, Any],
         expected_fields: Optional[Dict[str, type]] = None,
         valid_ranges: Optional[Dict[str, tuple]] = None,
+        duplicate_tracker=None,
     ) -> List[float]:
-        """Vectorise one payload into FEATURE_NAMES order."""
+        """Vectorise one payload into FEATURE_NAMES order.
+
+        `duplicate_tracker` supplies the `duplicate_flag` feature from
+        record *content*. Without one the flag falls back to the legacy
+        marker keys, and is 0.0 for payloads that carry none -- a
+        duplicate cannot be recognised from a single record in isolation.
+        """
         if isinstance(payload, str):
             try:
                 payload = json.loads(payload)
@@ -119,7 +128,14 @@ class FeatureExtractor:
                 if ratio > max_similarity:
                     max_similarity = ratio
 
-        duplicate_flag = 1.0 if any(marker in payload for marker in DUPLICATE_MARKER_KEYS) else 0.0
+        if duplicate_tracker is not None:
+            duplicate_flag = 1.0 if duplicate_tracker.observe(payload) else 0.0
+        else:
+            duplicate_flag = (
+                1.0
+                if any(marker in payload for marker in LEGACY_DUPLICATE_MARKERS)
+                else 0.0
+            )
 
         return [
             float(len(keys)),
@@ -139,7 +155,10 @@ class FeatureExtractor:
         payload: Dict[str, Any],
         expected_fields: Optional[Dict[str, type]] = None,
         valid_ranges: Optional[Dict[str, tuple]] = None,
+        duplicate_tracker=None,
     ) -> Dict[str, float]:
         """Same as extract_features, keyed by feature name."""
-        values = self.extract_features(payload, expected_fields, valid_ranges)
+        values = self.extract_features(
+            payload, expected_fields, valid_ranges, duplicate_tracker
+        )
         return dict(zip(self.FEATURE_NAMES, values))

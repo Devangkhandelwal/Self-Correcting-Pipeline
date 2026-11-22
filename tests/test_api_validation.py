@@ -75,3 +75,30 @@ def test_health_endpoint_reports_component_state(client):
     body = res.get_json()
     assert "status" in body
     assert "model_loaded" in body
+
+
+def test_repeated_normal_requests_are_not_reported_as_duplicates(client):
+    """Each request simulates an isolated stream event.
+
+    The weather upstream returns the same observation for an hour, so sharing
+    a long-lived duplicate tracker across requests made a second `normal` run
+    report `duplicate_record`.
+    """
+    for _ in range(3):
+        body = client.post(
+            "/api/run-pipeline",
+            json={"pipeline_id": "weather", "anomaly_type": "normal"},
+        ).get_json()
+        assert body["layer1_detection"]["anomaly_type"] == "normal"
+        assert body["is_duplicate"] is False
+
+
+def test_duplicate_request_is_detected_on_the_very_first_call(client):
+    """Must not depend on a previous request having populated history."""
+    body = client.post(
+        "/api/run-pipeline",
+        json={"pipeline_id": "iot", "anomaly_type": "duplicate_record"},
+    ).get_json()
+    assert body["layer1_detection"]["anomaly_type"] == "duplicate_record"
+    assert body["is_duplicate"] is True
+    assert body["healed_payload"]["_is_duplicate"] is True

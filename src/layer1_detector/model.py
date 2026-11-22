@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 import joblib
 import numpy as np
 
+from src.ingestion.dedup import DuplicateTracker
 from src.ingestion.injector import ANOMALY_CLASSES
 from src.layer1_detector.feature_extractor import FeatureExtractor
 from src.utils import config
@@ -30,10 +31,19 @@ MODEL_PATH = config.MODEL_PATH
 class MLAnomalyDetector:
     """Classifies an ingestion payload as normal or as a specific anomaly."""
 
-    def __init__(self, model_path: Optional[Path] = None):
+    def __init__(
+        self,
+        model_path: Optional[Path] = None,
+        duplicate_tracker: Optional[DuplicateTracker] = None,
+    ):
         self.extractor = FeatureExtractor()
         self.model = None
         self.model_path = Path(model_path) if model_path else config.MODEL_PATH
+        # Duplicate detection is inherently stateful: it needs to remember
+        # what has already flowed through the stream.
+        self.duplicate_tracker = (
+            duplicate_tracker if duplicate_tracker is not None else DuplicateTracker()
+        )
         self.load_model()
 
     @property
@@ -64,17 +74,51 @@ class MLAnomalyDetector:
         payload: Dict[str, Any],
         expected_fields: Optional[Dict[str, type]] = None,
         valid_ranges: Optional[Dict[str, tuple]] = None,
+        track_duplicates: bool = True,
+        duplicate_tracker: Optional[DuplicateTracker] = None,
     ) -> Dict[str, Any]:
         """Classify one payload.
 
         Returns is_anomaly, anomaly_type, confidence, the feature vector, the
         per-class probabilities when a model is loaded, and which engine
         produced the verdict.
+
+        Observing the payload updates the duplicate tracker, so calling
+        this twice on the same record reports the second as a duplicate --
+        correct streaming behaviour. Pass track_duplicates=False to
+        classify without recording, or `duplicate_tracker` to score
+        against a specific stream's state instead of this detector's.
         """
+        # Identity check, not truthiness: an empty tracker is falsy because
+        # DuplicateTracker defines __len__, so `or` would discard it.
+        tracker = (
+            duplicate_tracker if duplicate_tracker is not None else self.duplicate_tracker
+        )
         features = self.extractor.extract_features(
-            payload, expected_fields=expected_fields, valid_ranges=valid_ranges
+            payload,
+            expected_fields=expected_fields,
+            valid_ranges=valid_ranges,
+            duplicate_tracker=tracker if track_duplicates else None,
         )
         feature_dict = dict(zip(FeatureExtractor.FEATURE_NAMES, features))
+        return self.classify(feature_dict)
+
+    def observe(self, payload: Dict[str, Any]) -> bool:
+        """Register a record as having flowed through the stream.
+
+        Used to seed the tracker when a record is known to have been seen
+        earlier -- for instance when simulating a replayed payload.
+        """
+        return self.duplicate_tracker.observe(payload)
+
+    def classify(self, feature_dict: Dict[str, float]) -> Dict[str, Any]:
+        """Classify a precomputed feature vector.
+
+        Separated from detect() so a caller can extract features once and
+        score them with both the model and the rule baseline; the evaluator
+        previously extracted twice per row.
+        """
+        features = [feature_dict[name] for name in FeatureExtractor.FEATURE_NAMES]
 
         if self.model is None:
             result = self.rule_based_predict(feature_dict)

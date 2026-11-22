@@ -52,6 +52,13 @@ def run_demo(pipeline_id: str = "weather", anomaly: str = "schema_drift") -> boo
     print(f"Applied anomaly: {label}")
     print(json.dumps(corrupted, indent=2))
 
+    # A duplicate only exists relative to a stream. This one-shot demo has no
+    # prior traffic, so register the record as having arrived earlier --
+    # otherwise there is genuinely nothing for detection to recognise.
+    if label == "duplicate_record":
+        detector.observe(corrupted)
+        print("(registered this record as already seen, to simulate a replay)")
+
     print("\n" + THIN)
     print("[STEP 3] Layer 1: ML anomaly detector...")
     detection = detector.detect(
@@ -103,7 +110,10 @@ def run_demo(pipeline_id: str = "weather", anomaly: str = "schema_drift") -> boo
 
     print(THIN)
     print("[STEP 6] Parsing the corrupted payload with the active parser...")
-    healed = orchestrator.parse(corrupted, pipeline_id=pipeline_id)
+    is_duplicate = bool(detection.get("features", {}).get("duplicate_flag", 0.0))
+    healed = orchestrator.parse(
+        corrupted, pipeline_id=pipeline_id, is_duplicate=is_duplicate
+    )
     print(json.dumps(healed, indent=2))
 
     print("\n" + RULE)

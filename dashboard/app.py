@@ -26,6 +26,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+from src.ingestion.dedup import DuplicateTracker
 from src.ingestion.injector import ANOMALY_CLASSES, SyntheticAnomalyInjector
 from src.ingestion.pipeline_registry import registry
 from src.layer1_detector.evaluator import evaluate_layer1
@@ -95,11 +96,21 @@ def run_pipeline(pipeline_id: str, anomaly: str, use_live_data: bool) -> None:
         valid_ranges=pipeline.valid_ranges,
     )
 
+    # Each run simulates one isolated stream event, so it gets its own
+    # duplicate tracker; sharing a long-lived one would report a repeated
+    # `normal` weather run as a duplicate, since that upstream returns the
+    # same observation for an hour.
+    request_tracker = DuplicateTracker()
+    if label == "duplicate_record":
+        request_tracker.observe(corrupted)
+
     detection = components["detector"].detect(
         corrupted,
         expected_fields=pipeline.expected_schema,
         valid_ranges=pipeline.valid_ranges,
+        duplicate_tracker=request_tracker,
     )
+    is_duplicate = bool(detection.get("features", {}).get("duplicate_flag", 0.0))
 
     state = st.session_state
     state.pipeline_id = pipeline_id
@@ -115,6 +126,7 @@ def run_pipeline(pipeline_id: str, anomaly: str, use_live_data: bool) -> None:
     state.last_verif = None
     state.last_heal_success = None
     state.healed_payload = None
+    state.is_duplicate = is_duplicate
 
     if not detection["is_anomaly"]:
         return
@@ -143,7 +155,7 @@ def run_pipeline(pipeline_id: str, anomaly: str, use_live_data: bool) -> None:
     if success:
         # Pass a copy: the parser must not touch the record on display.
         state.healed_payload = components["orchestrator"].parse(
-            dict(corrupted), pipeline_id=pipeline_id
+            dict(corrupted), pipeline_id=pipeline_id, is_duplicate=is_duplicate
         )
 
 
