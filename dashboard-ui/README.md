@@ -1,16 +1,54 @@
-# React + Vite
+# Agent Console (React + Vite)
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+The browser console for the Autonomous Self-Healing Data Pipeline Agent. It
+talks to the Flask API in `../api/server.py`.
 
-Currently, two official plugins are available:
+## Running it
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+The backend must be up first, because every panel is driven by the API:
 
-## React Compiler
+```bash
+# from the repository root, in one terminal
+python run_data_and_train.py     # once, to build the dataset and model
+python api/server.py
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+# in another terminal
+cd dashboard-ui
+npm install
+npm run dev                      # http://localhost:3000
+```
 
-## Expanding the Oxlint configuration
+`vite.config.js` proxies `/api` to `http://127.0.0.1:5000`, so no CORS
+configuration is needed in development. If you change the API port, set
+`PORT` for the backend and update the proxy target to match.
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+## Scripts
+
+| Command           | Purpose                                  |
+| ----------------- | ---------------------------------------- |
+| `npm run dev`     | Dev server with HMR on port 3000         |
+| `npm run build`   | Production build into `dist/`            |
+| `npm run preview` | Serve the production build locally       |
+| `npm run lint`    | Oxlint over `src/`                       |
+
+## Layout
+
+```
+src/
+  api.js                  Single fetch wrapper; checks res.ok and raises ApiError
+  App.jsx                 Shell: nav, hero, controls, tab routing
+  components/
+    LivePipeline.jsx      Clean / corrupted / healed payload comparison
+    MLDetector.jsx        Layer 1 verdict and feature vector
+    LLMDiagnosis.jsx      Layer 2 root-cause report
+    PatchSandbox.jsx      Generated patch and verification result
+    EvaluationAudit.jsx   Layer 1 benchmark and audit trail
+    ErrorNotice.jsx       Shared inline error panel with retry
+    Plasma.jsx            WebGL background shader
+    ParticleText.jsx      Canvas particle headline
+    ScrollExpand.jsx      Scroll-driven hero expansion
+    CyberBlocks.jsx       Decorative SVG blocks for the architecture cards
+```
+
+Every panel handles its own loading, empty and error states; `api.js` is the
+only place that calls `fetch`.
