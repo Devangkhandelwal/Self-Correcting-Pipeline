@@ -18,16 +18,43 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 from sklearn.metrics import confusion_matrix, precision_recall_fscore_support
 
+from src.ingestion.dedup import DuplicateTracker
 from src.ingestion.injector import ANOMALY_CLASSES
 from src.layer1_detector.feature_extractor import FeatureExtractor
 from src.layer1_detector.model import MLAnomalyDetector
 from src.utils import config
 from src.utils.logger import logger
 
-#: Features whose value is determined by how the injector marks a record
-#: rather than by the data itself. Reported so the headline score is read
-#: with the right caveat; see README "Measurement caveats".
-LEAKY_FEATURES = ("duplicate_flag",)
+#: Features previously determined by injector marker keys rather than by
+#: record content. Now empty: `duplicate_flag` is computed from a content
+#: fingerprint (see src/ingestion/dedup.py), so no feature encodes a label.
+LEAKY_FEATURES = ()
+
+
+#: Below this F1 difference the trained model is treated as adding nothing.
+LIFT_SIGNIFICANCE = 0.01
+
+
+def _lift_verdict(f1_lift: float) -> str:
+    """State plainly whether the trained model is earning its place."""
+    if f1_lift > LIFT_SIGNIFICANCE:
+        return (
+            "The model is outperforming the rules, so it is carrying its weight "
+            "on this dataset: the engineered features leave genuine ambiguity "
+            "that a learned decision boundary resolves better than fixed "
+            "thresholds do."
+        )
+    if f1_lift < -LIFT_SIGNIFICANCE:
+        return (
+            "The model is performing WORSE than the handwritten rules. Prefer the "
+            "rule baseline until this is understood."
+        )
+    return (
+        "A lift at or near zero means the model is not earning its place on this "
+        "dataset: the engineered features already encode the anomaly definitions "
+        "the rules test directly, so there is nothing left to learn. Try "
+        "--difficulty hard for a benchmark with genuine ambiguity."
+    )
 
 
 def _load_split() -> Optional[Dict[str, Any]]:
@@ -73,23 +100,31 @@ def evaluate_layer1(detector: Optional[MLAnomalyDetector] = None) -> Dict[str, A
     model_predictions: List[str] = []
     baseline_predictions: List[str] = []
 
-    for _, row in evaluation_frame.iterrows():
-        true_label = row["label"]
-        if true_label not in ANOMALY_CLASSES:
-            continue
+    # The whole dataset is replayed in file order through one tracker so
+    # the content-based duplicate_flag matches what a live stream would
+    # see, but only the evaluation rows are scored. Scoring the test rows
+    # in isolation would miss every duplicate whose original sits in the
+    # training split.
+    tracker = DuplicateTracker()
+    scored_ids = set(evaluation_frame["id"].tolist())
+
+    for _, row in frame.iterrows():
         try:
             payload = json.loads(row["payload_json"])
         except (TypeError, ValueError):
             continue
 
+        # Extract once, with the tracker, and score both engines on it.
+        feature_dict = detector.extractor.extract_feature_dict(
+            payload, duplicate_tracker=tracker
+        )
+
+        true_label = row["label"]
+        if row["id"] not in scored_ids or true_label not in ANOMALY_CLASSES:
+            continue
+
         labels.append(true_label)
-
-        model_result = detector.detect(payload)
-        model_predictions.append(model_result["anomaly_type"])
-
-        # Extract once and reuse, via public API.
-        features = detector.extractor.extract_features(payload)
-        feature_dict = dict(zip(FeatureExtractor.FEATURE_NAMES, features))
+        model_predictions.append(detector.classify(feature_dict)["anomaly_type"])
         baseline_predictions.append(
             detector.rule_based_predict(feature_dict)["anomaly_type"]
         )
@@ -136,21 +171,22 @@ def evaluate_layer1(detector: Optional[MLAnomalyDetector] = None) -> Dict[str, A
         "model_vs_baseline": {
             "f1_lift": round(f1_lift, 4),
             "agreement_rate": round(agreement_rate, 4),
+            "verdict": _lift_verdict(f1_lift),
             "note": (
                 "The trained model and the rule baseline agree on "
                 f"{agreement_rate * 100:.1f}% of held-out rows for an F1 lift of "
-                f"{f1_lift:+.4f}. A lift at or near zero means the RandomForest "
-                "is not earning its place on this benchmark: the engineered "
-                "features already encode the anomaly definitions the rules test."
+                f"{f1_lift:+.4f}. {_lift_verdict(f1_lift)}"
             ),
         },
         "engine": "ml_model" if detector.is_trained else "rule_based",
         "caveat": (
-            "This task is close to separable by construction: the feature "
-            f"{LEAKY_FEATURES[0]!r} is set by the injector's own marker keys, and "
-            "every feature is computed against the same schema the injector "
-            "perturbs. Treat a near-perfect score as a property of the synthetic "
-            "benchmark, not evidence of real-world accuracy."
+            "Scores come from synthetic data whose anomalies are generated by "
+            "the same schema definitions the features are computed against, so "
+            "the classes are far more separable here than in real traffic. No "
+            "feature encodes a label any more -- duplicate_flag is derived from "
+            "a content fingerprint rather than injector marker keys -- but a "
+            "high score remains a property of this benchmark, not evidence of "
+            "real-world accuracy."
         ),
     }
 

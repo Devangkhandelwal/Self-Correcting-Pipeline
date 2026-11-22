@@ -24,11 +24,16 @@ def main() -> int:
                         help="RNG seed, for reproducible datasets")
     parser.add_argument("--skip-generate", action="store_true",
                         help="train on the existing dataset instead of regenerating")
+    parser.add_argument("--difficulty", default="standard", choices=["standard", "hard"],
+                        help="'hard' adds confounders that make the task genuinely "
+                             "ambiguous, for comparing the model against the baseline")
     args = parser.parse_args()
 
     if not args.skip_generate:
         logger.info("Step 1/3: generating synthetic dataset and held-out batches...")
-        summary = generate_datasets(num_samples=args.samples, seed=args.seed)
+        summary = generate_datasets(
+            num_samples=args.samples, seed=args.seed, difficulty=args.difficulty
+        )
         logger.info(
             "Generated %d samples and %d held-out batches (seed %d).",
             summary["samples"], summary["heldout_batches"], summary["seed"],
@@ -64,6 +69,8 @@ def main() -> int:
     print(f"{'Rule baseline':<16}{baseline['precision'] * 100:>11.2f}%"
           f"{baseline['recall'] * 100:>11.2f}%{baseline['f1_score'] * 100:>11.2f}%")
     print("=" * 68)
+    comparison = metrics["model_vs_baseline"]
+    print(f"\nModel vs baseline: {comparison['note']}")
     print(f"\nNote: {metrics['split_note']}")
     print(f"\nCaveat: {metrics['caveat']}\n")
     return 0

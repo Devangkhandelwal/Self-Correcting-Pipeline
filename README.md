@@ -6,7 +6,7 @@
 [![Flask](https://img.shields.io/badge/Flask-3.0%2B-000000.svg?logo=flask&logoColor=white)](https://flask.palletsprojects.com/)
 [![Google Gemini](https://img.shields.io/badge/Google%20Gemini-2.5%20Flash-4285F4.svg?logo=google&logoColor=white)](https://ai.google.dev/)
 [![Scikit-Learn](https://img.shields.io/badge/Scikit--Learn-1.3%2B-F7931E.svg?logo=scikit-learn&logoColor=white)](https://scikit-learn.org/)
-[![Tests](https://img.shields.io/badge/Tests-104%20passing-brightgreen.svg?logo=pytest&logoColor=white)](https://docs.pytest.org/)
+[![Tests](https://img.shields.io/badge/Tests-135%20passing-brightgreen.svg?logo=pytest&logoColor=white)](https://docs.pytest.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A **self-healing data ingestion agent**. When an upstream provider silently
@@ -112,13 +112,23 @@ schema and ranges:
 | 5 | `null_val_count` | null values |
 | 6 | `max_key_similarity` | best string similarity between a missing and an extra key (rename signal) |
 | 7 | `outlier_count` | numeric values outside their declared range |
-| 8 | `duplicate_flag` | duplicate marker present (**see caveats**) |
+| 8 | `duplicate_flag` | record content has been seen before in this stream |
 | 9 | `string_type_count` | string-valued fields |
 | 10 | `bool_type_count` | boolean-valued fields |
 
 A `RandomForestClassifier` maps that vector to one of six classes. When no
 trained model is present the detector falls back to an explicit rule baseline,
 and `detect()` reports which engine produced the verdict.
+
+Feature 8 comes from a `DuplicateTracker` (`src/ingestion/dedup.py`), which
+keeps a bounded set of SHA-256 content fingerprints over schema-relevant
+fields. Key order does not affect a fingerprint and annotation keys are
+excluded, so a record does not change identity merely by being annotated.
+Deduplication is inherently stateful — a duplicate is only a duplicate
+*relative to a stream* — so it lives in the ingestion stage. A single record
+in isolation can never be known to be a repeat, and the API's
+`/api/run-pipeline` therefore gives each request its own tracker and primes it
+explicitly when asked to simulate a replay.
 
 ### Layer 2 · Root-Cause Diagnosis (`src/layer2_diagnostician/`)
 
@@ -142,8 +152,34 @@ code from these values.
 ### Layer 3 · Patch Synthesis & Verification (`src/layer3_patcher/`)
 
 Generates a table-driven `parse_payload(payload: dict) -> dict` that applies
-alias recovery, type coercion, schema-safe defaults, range clamping, duplicate
-normalisation, and pass-through of unrecognised fields.
+alias recovery, type coercion, schema-safe defaults, range clamping, and
+pass-through of unrecognised fields.
+
+**Every field the parser touches is disclosed.** The healed record carries a
+`_healing` block naming what changed and what was there before, so a consumer
+can tell a value that genuinely arrived from one the parser invented:
+
+```json
+{
+  "amount": 0.01,
+  "risk_score": 1.0,
+  "_healing": {
+    "amount":     { "actions": ["defaulted"],       "original": null },
+    "risk_score": { "actions": ["clamped_to_max"],  "original": 870.5 }
+  }
+}
+```
+
+Fields absent from that block passed through untouched, and a record that
+needed no healing carries no `_healing` key at all. Actions are
+`aliased_from:<key>`, `defaulted`, `defaulted_blank`, `coerced_to_number`,
+`coerced_to_str`, `rejected_bool`, `clamped_to_min`, `clamped_to_max` and
+`dropped_unrecognised`.
+
+Duplicate records are the one case a generated parser cannot handle: it sees
+one record at a time and cannot know about a repeat. Detection owns that
+state, and `parse(..., is_duplicate=True)` records its verdict as
+`_is_duplicate` on the output.
 
 Retries **escalate** rather than repeat:
 
@@ -189,7 +225,7 @@ Injected by `src/ingestion/injector.py` (accepts a seeded RNG for reproducibilit
 | `type_mismatch` | number serialised as a string or boolean |
 | `null_field` | key set to null, or omitted entirely |
 | `outlier` | sensor spike outside the declared range |
-| `duplicate_record` | replayed event from a retry storm |
+| `duplicate_record` | a verbatim replay of an earlier record (no marker keys) |
 
 ---
 
@@ -263,16 +299,38 @@ executing generated code. A Gemini-backed Layer 2 adds network latency.
 
 ### Detection quality
 
-240-row held-out split, seed 42 — rows the model never saw:
+240-row held-out split, seed 42 — rows the model never saw. Two benchmarks,
+because the answer differs:
+
+**`--difficulty standard`** (the default)
 
 | Engine | Precision | Recall | F1 |
 |---|---|---|---|
 | RandomForest | 100% | 100% | 100% |
 | Rule baseline | 100% | 100% | 100% |
 
-**The trained model shows zero measurable lift over the handwritten rule
-baseline**: the two agree on 100% of held-out rows for an F1 lift of
-`+0.0000`. Read the caveats below before quoting any of this.
+F1 lift `+0.0000`; the two engines agree on every row. This benchmark is
+trivially separable: each anomaly class maps to a distinct feature signature,
+so there is nothing for a model to learn that the rules do not already encode.
+**On this dataset the RandomForest earns nothing.**
+
+**`--difficulty hard`** adds confounders that attack the baseline's fixed 0.4
+key-similarity threshold from both sides — genuine renames whose similarity
+falls *below* it (mirroring `reorder_level` → `min_stock` at 0.09), and plain
+missing fields accompanied by a coincidental lookalike key that scores *above*
+it. The labels are unchanged; only the features become ambiguous.
+
+| Engine | Precision | Recall | F1 |
+|---|---|---|---|
+| RandomForest | 100% | 100% | 100% |
+| Rule baseline | 90.96% | 89.58% | 89.09% |
+
+F1 lift **`+0.1091`**, agreement 89.6%. **Here the model does earn its place:**
+a learned decision boundary resolves the ambiguity that a hand-tuned constant
+cannot. `GET /api/evaluate` reports the measured lift and a verdict on it, so
+the claim is never stated without its evidence.
+
+Reproduce either with `python run_data_and_train.py [--difficulty hard]`.
 
 ### Healing coverage
 
@@ -285,25 +343,26 @@ verified against 101–121 records. Covered by `tests/test_multidomain_healing.p
 
 Being blunt, because the headline figures look better than they are:
 
-1. **The benchmark is close to separable by construction.** Feature
-   `duplicate_flag` is set by the *injector's own marker keys*
-   (`_is_duplicate_flag`, `duplicate_uuid`) — for that class the feature
-   effectively *is* the label. Every other feature is computed against the same
-   schema the injector perturbs.
-2. **The RandomForest earns nothing here.** It agrees with the rule baseline on
-   every held-out row. The engineered features already encode the anomaly
-   definitions the rules test directly, so on this benchmark the ML layer is
-   decoration. It is retained because it generalises to feature *combinations*
-   the rules do not enumerate — but that benefit is unmeasured.
-3. **100% is a property of the synthetic data, not evidence of real-world
-   accuracy.** There is no real-world labelled evaluation set.
-4. **Declared-alias recovery is configuration, not inference.** When the
+1. **No feature encodes a label any more.** `duplicate_flag` used to be set by
+   the injector's own marker keys (`_is_duplicate_flag`, `duplicate_uuid`),
+   which for that class made the feature *be* the label. It is now derived from
+   a content fingerprint, and the injector emits genuine replays instead of
+   planting markers.
+2. **The standard benchmark is still separable by construction.** Every feature
+   is computed against the same schema definitions the injector perturbs, so
+   the classes are far cleaner here than in real traffic. 100% is a property of
+   this dataset, not evidence of real-world accuracy — which is exactly why
+   `--difficulty hard` exists.
+3. **"The model earns its place" is a claim about the hard benchmark only.**
+   The +0.109 lift is measured against confounders this project invented. It
+   demonstrates that a learned boundary beats a fixed threshold *when the task
+   is ambiguous*; it is not evidence of accuracy on live traffic.
+4. **There is no real-world labelled evaluation set.** Everything above is
+   synthetic.
+5. **Declared-alias recovery is configuration, not inference.** When the
    injector renames via the registry's table and the healer consults that same
    table, the loop is partly circular. The genuinely autonomous part is the
-   fuzzy fallback for *undeclared* renames.
-5. **Duplicate detection is marker-based, not content-based.** It does not hash
-   payloads or track recently-seen records. See
-   [Known Limitations](#-known-limitations).
+   fuzzy fallback for *undeclared* renames — which is what hard mode stresses.
 
 `GET /api/evaluate` returns these caveats inline, and both dashboards display
 them next to the metrics.
@@ -383,7 +442,8 @@ container or VM with seccomp and no network.
 ├── src/
 │   ├── ingestion/
 │   │   ├── api_client.py      # thin facade over WeatherPipeline
-│   │   ├── generate_data.py   # seeded, varied, per-pipeline generation
+│   │   ├── dedup.py           # content-fingerprint duplicate tracker
+│   │   ├── generate_data.py   # seeded generation; standard & hard difficulty
 │   │   ├── injector.py        # anomaly injection (seedable RNG)
 │   │   └── pipeline_registry.py  # single source of truth for all schemas
 │   ├── layer1_detector/
@@ -402,14 +462,16 @@ container or VM with seccomp and no network.
 │       ├── config.py          # all configuration, read from env
 │       └── logger.py          # rotating logs + JSONL audit trail
 │
-└── tests/                     # 104 tests
+└── tests/                     # 135 tests
     ├── test_api_validation.py      # request validation, bounds, health
+    ├── test_dedup.py               # fingerprinting, tracker, replay injection
     ├── test_e2e_pipeline.py        # end-to-end weather cycle
     ├── test_heldout_data.py        # verification-data integrity
     ├── test_injector.py            # all anomaly classes injectable
     ├── test_layer1.py              # extractor + detector
     ├── test_multidomain_healing.py # every rename pair; every anomaly x pipeline
     ├── test_outlier_healing.py     # range-driven diagnosis + clamping
+    ├── test_provenance.py          # healed records disclose what changed
     └── test_sandbox_security.py    # malicious patches rejected; timeout enforced
 ```
 
@@ -442,12 +504,16 @@ The dataset, model and held-out batches are build artifacts and are **not**
 committed. Generate them before first run:
 
 ```bash
-python run_data_and_train.py
+python run_data_and_train.py                    # standard benchmark
+python run_data_and_train.py --difficulty hard  # confounded benchmark
 ```
 
 Without this, Layer 1 falls back to rule-based heuristics (the API reports
 `model_loaded: false` and both dashboards warn about it) and Layer 3 falls back
 to a small synthetic verification set.
+
+Both runs print precision, recall, F1, the model-versus-baseline lift and a
+verdict on whether the trained model is carrying its weight.
 
 ### 3. Run it
 
@@ -498,6 +564,10 @@ The settings worth knowing:
 | `SANDBOX_TIMEOUT_SECONDS` | `15` | wall-clock limit per verification run |
 | `KEY_SIMILARITY_THRESHOLD` | `0.4` | minimum similarity to infer an undeclared rename |
 
+Deduplication memory is set in code (`dedup.DEFAULT_CAPACITY`, 2048
+fingerprints) rather than by environment variable, since it is a property of
+the ingestion stage rather than a deployment knob.
+
 ---
 
 ## 🧪 Running the Tests
@@ -506,19 +576,21 @@ The settings worth knowing:
 pytest tests/ -v
 ```
 
-104 tests, roughly 35 seconds. What they cover:
+135 tests, roughly 40 seconds. What they cover:
 
 ```text
-tests/test_api_validation.py ........                           [  8%]
-tests/test_e2e_pipeline.py .                                     [  9%]
-tests/test_heldout_data.py ..                                    [ 11%]
-tests/test_injector.py .                                         [ 12%]
-tests/test_layer1.py ..                                          [ 13%]
-tests/test_multidomain_healing.py ..........................     [ 69%]
-tests/test_outlier_healing.py ............                       [ 81%]
+tests/test_api_validation.py ..........                          [  7%]
+tests/test_dedup.py .....................                        [ 23%]
+tests/test_e2e_pipeline.py .                                     [ 24%]
+tests/test_heldout_data.py ..                                    [ 25%]
+tests/test_injector.py .                                         [ 26%]
+tests/test_layer1.py ..                                          [ 27%]
+tests/test_multidomain_healing.py ..........................     [ 47%]
+tests/test_outlier_healing.py ............                       [ 56%]
+tests/test_provenance.py .........                               [ 63%]
 tests/test_sandbox_security.py ......................            [100%]
 
-============================= 104 passed in ~35s ==============================
+============================= 135 passed in ~40s ==============================
 ```
 
 The suite deliberately enumerates **every declared rename pair** rather than
@@ -547,22 +619,27 @@ so it works as a smoke check in CI.
 
 Honest about what this does not do:
 
-- **Duplicate detection is marker-based.** It looks for injector marker keys
-  rather than hashing payloads or tracking recently-seen records. Real
-  content-based deduplication needs state across records and is not
-  implemented.
-- **The ML layer adds no measured value** over the rule baseline on this
-  benchmark (see caveats). It is not currently justified by evidence.
+- **Deduplication is bounded and order-dependent.** The tracker remembers the
+  last 2048 fingerprints, so a duplicate separated from its original by more
+  than that is missed — the normal trade for streaming deduplication. It also
+  cannot see a repeat across process restarts, since the memory is in-process.
+- **Defaults are still invented values.** A backfilled field gets a
+  schema-safe default (`0.01` for finance `amount`, clamped into range).
+  Healing keeps the pipeline flowing; it does not recover data that never
+  arrived. The `_healing` block now makes this visible downstream, but it does
+  not make the value real.
 - **The AST screen is a denylist, not a capability sandbox.** See
   [Security Model](#-security-model).
-- **Three of four pipelines are simulated.** Only `weather` hits a real API.
-- **Defaults are invented values.** A backfilled field gets a schema-safe
-  default (`0.01` for finance `amount`, clamped into range). Healing keeps the
-  pipeline flowing; it does not recover data that never arrived. Downstream
-  consumers cannot currently distinguish a real value from a backfilled one —
-  emitting per-field provenance would be the fix.
-- **No authentication on the API.** It is bound to loopback by design. Exposing
-  it requires adding auth.
+- **Three of four pipelines are simulated.** Only `weather` hits a real API,
+  and it returns the same observation for up to an hour — so repeated live
+  fetches are genuine content duplicates.
+- **Layer 1 mislabels low-similarity drift when trained on standard data.** A
+  rename like `reorder_level` → `min_stock` is reported as `null_field`.
+  Healing still recovers the field, because Layer 3 consults the declared
+  alias table regardless of Layer 2's category — but the label is wrong. Train
+  with `--difficulty hard` to fix the label too.
+- **No authentication on the API.** It is bound to loopback by design.
+  Exposing it requires adding auth.
 - **No live-traffic evaluation.** All metrics come from synthetic data.
 
 ---
