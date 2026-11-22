@@ -39,7 +39,9 @@ export default function PatchSandbox({ result }) {
         </div>
         <div className="metric-card">
           <div className="metric-card__label">Parser Status</div>
-          <div className="metric-card__value metric-card__value--green">
+          <div
+            className={`metric-card__value ${success ? 'metric-card__value--green' : 'metric-card__value--red'}`}
+          >
             {success ? 'HOT-SWAPPED' : 'INACTIVE'}
           </div>
         </div>
@@ -79,8 +81,8 @@ export default function PatchSandbox({ result }) {
               </div>
               <div style={{ fontSize: '0.83rem', color: 'var(--text-secondary)', marginTop: 4 }}>
                 {success
-                  ? 'Patch applied and verified in isolated sandbox. Parser is now active in production.'
-                  : 'Patch failed verification checks. Review and retry.'}
+                  ? 'Patch AST-screened, executed in an isolated interpreter under a timeout, and scored against held-out records before activation.'
+                  : 'Patch failed verification. The previous parser remains in effect.'}
               </div>
             </div>
           </div>
@@ -96,7 +98,7 @@ export default function PatchSandbox({ result }) {
               gap: 10,
             }}>
               <span className="status-dot status-dot--blue" />
-              <span className="badge badge--healed">ACTIVE HOT-SWAPPED PARSER IN PRODUCTION</span>
+              <span className="badge badge--healed">ACTIVE HOT-SWAPPED PARSER</span>
             </div>
           )}
 

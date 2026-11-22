@@ -1,0 +1,269 @@
+/* ============================================
+       AURORA BEAM ANIMATED BACKGROUND
+       Sweeping layered sheets of light effect
+       ============================================ */
+
+    /* Force dark base for entire app */
+    .stApp {
+        background: #030712 !important;
+    }
+
+    /* Aurora Beam Container — fixed behind all content */
+    .aurora-beam-bg {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100vw;
+        height: 100vh;
+        overflow: hidden;
+        z-index: 0;
+        pointer-events: none;
+    }
+
+    /* Individual aurora light sheets */
+    .aurora-sheet {
+        position: absolute;
+        width: 200%;
+        height: 60%;
+        border-radius: 50%;
+        filter: blur(80px);
+        opacity: 0;
+        mix-blend-mode: screen;
+    }
+
+    /* Sheet 1: Deep indigo sweep */
+    .aurora-sheet-1 {
+        background: radial-gradient(ellipse at center, rgba(99, 102, 241, 0.35) 0%, rgba(79, 70, 229, 0.15) 40%, transparent 70%);
+        top: -30%;
+        left: -50%;
+        animation: aurora-sweep-1 8s ease-in-out infinite alternate;
+    }
+
+    /* Sheet 2: Violet / purple beam */
+    .aurora-sheet-2 {
+        background: radial-gradient(ellipse at center, rgba(139, 92, 246, 0.30) 0%, rgba(124, 58, 237, 0.12) 40%, transparent 70%);
+        top: -20%;
+        left: -30%;
+        animation: aurora-sweep-2 10s ease-in-out infinite alternate;
+    }
+
+    /* Sheet 3: Teal / cyan ribbon */
+    .aurora-sheet-3 {
+        background: radial-gradient(ellipse at center, rgba(6, 182, 212, 0.25) 0%, rgba(20, 184, 166, 0.10) 40%, transparent 70%);
+        top: -25%;
+        left: -20%;
+        animation: aurora-sweep-3 12s ease-in-out infinite alternate;
+    }
+
+    /* Sheet 4: Magenta / pink accent */
+    .aurora-sheet-4 {
+        background: radial-gradient(ellipse at center, rgba(236, 72, 153, 0.20) 0%, rgba(219, 39, 119, 0.08) 40%, transparent 70%);
+        top: -15%;
+        left: -40%;
+        animation: aurora-sweep-4 14s ease-in-out infinite alternate;
+    }
+
+    /* Sheet 5: Emerald shimmer */
+    .aurora-sheet-5 {
+        background: radial-gradient(ellipse at center, rgba(52, 211, 153, 0.18) 0%, rgba(16, 185, 129, 0.06) 40%, transparent 70%);
+        top: -35%;
+        left: 0%;
+        animation: aurora-sweep-5 9s ease-in-out infinite alternate;
+    }
+
+    @keyframes aurora-sweep-1 {
+        0%   { transform: translateX(-10%) translateY(0%) rotate(-8deg) scale(1);   opacity: 0.6; }
+        50%  { transform: translateX(15%) translateY(5%) rotate(4deg) scale(1.1);   opacity: 0.85; }
+        100% { transform: translateX(40%) translateY(-5%) rotate(-3deg) scale(1.05); opacity: 0.5; }
+    }
+    @keyframes aurora-sweep-2 {
+        0%   { transform: translateX(20%) translateY(10%) rotate(5deg) scale(1.05);  opacity: 0.5; }
+        50%  { transform: translateX(-5%) translateY(-8%) rotate(-6deg) scale(1.15); opacity: 0.75; }
+        100% { transform: translateX(-25%) translateY(3%) rotate(8deg) scale(0.95);  opacity: 0.55; }
+    }
+    @keyframes aurora-sweep-3 {
+        0%   { transform: translateX(-15%) translateY(-5%) rotate(3deg) scale(1.1);  opacity: 0.45; }
+        50%  { transform: translateX(25%) translateY(12%) rotate(-5deg) scale(1);    opacity: 0.7; }
+        100% { transform: translateX(10%) translateY(-10%) rotate(6deg) scale(1.2);  opacity: 0.4; }
+    }
+    @keyframes aurora-sweep-4 {
+        0%   { transform: translateX(30%) translateY(5%) rotate(-4deg) scale(0.9);   opacity: 0.35; }
+        50%  { transform: translateX(-10%) translateY(-3%) rotate(7deg) scale(1.1);  opacity: 0.6; }
+        100% { transform: translateX(-30%) translateY(8%) rotate(-2deg) scale(1);    opacity: 0.3; }
+    }
+    @keyframes aurora-sweep-5 {
+        0%   { transform: translateX(5%) translateY(-8%) rotate(2deg) scale(1);      opacity: 0.3; }
+        50%  { transform: translateX(-20%) translateY(5%) rotate(-4deg) scale(1.15); opacity: 0.55; }
+        100% { transform: translateX(15%) translateY(10%) rotate(5deg) scale(0.95);  opacity: 0.25; }
+    }
+
+    /* Subtle noise grain overlay for realism */
+    .aurora-grain {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100vw;
+        height: 100vh;
+        z-index: 0;
+        pointer-events: none;
+        opacity: 0.03;
+        background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+        background-repeat: repeat;
+    }
+
+    /* ============================================
+       GLASSMORPHISM UI COMPONENTS
+       ============================================ */
+
+    /* Main content container — ensure above aurora */
+    .main .block-container {
+        position: relative;
+        z-index: 1;
+    }
+
+    /* Header styling */
+    .main-header {
+        font-size: 2.5rem;
+        font-weight: 800;
+        background: linear-gradient(135deg, #818CF8 0%, #A78BFA 25%, #C084FC 50%, #F472B6 75%, #34D399 100%);
+        background-size: 200% 200%;
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        animation: gradient-shift 6s ease infinite;
+        margin-bottom: 0.2rem;
+        text-shadow: 0 0 40px rgba(139, 92, 246, 0.3);
+    }
+
+    @keyframes gradient-shift {
+        0%   { background-position: 0% 50%; }
+        50%  { background-position: 100% 50%; }
+        100% { background-position: 0% 50%; }
+    }
+
+    .sub-header {
+        color: rgba(156, 163, 175, 0.9);
+        font-size: 1.05rem;
+        margin-bottom: 1.5rem;
+        letter-spacing: 0.02em;
+    }
+
+    /* Glassmorphism card */
+    .card {
+        background: rgba(17, 24, 39, 0.65);
+        backdrop-filter: blur(16px);
+        -webkit-backdrop-filter: blur(16px);
+        border-radius: 16px;
+        padding: 20px;
+        border: 1px solid rgba(75, 85, 99, 0.4);
+        margin-bottom: 15px;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+    }
+
+    .metric-box {
+        background: rgba(17, 24, 39, 0.5);
+        backdrop-filter: blur(12px);
+        border-radius: 12px;
+        padding: 12px;
+        border: 1px solid rgba(75, 85, 99, 0.3);
+        text-align: center;
+    }
+
+    /* Status badges with glow effects */
+    .badge-normal {
+        background: rgba(6, 95, 70, 0.6);
+        color: #34D399;
+        padding: 5px 14px;
+        border-radius: 20px;
+        font-weight: 600;
+        box-shadow: 0 0 12px rgba(52, 211, 153, 0.25);
+        border: 1px solid rgba(52, 211, 153, 0.3);
+    }
+    .badge-anomaly {
+        background: rgba(153, 27, 27, 0.6);
+        color: #F87171;
+        padding: 5px 14px;
+        border-radius: 20px;
+        font-weight: 600;
+        box-shadow: 0 0 12px rgba(248, 113, 113, 0.25);
+        border: 1px solid rgba(248, 113, 113, 0.3);
+    }
+    .badge-healed {
+        background: rgba(30, 64, 175, 0.6);
+        color: #60A5FA;
+        padding: 5px 14px;
+        border-radius: 20px;
+        font-weight: 600;
+        box-shadow: 0 0 12px rgba(96, 165, 250, 0.25);
+        border: 1px solid rgba(96, 165, 250, 0.3);
+    }
+
+    /* Sidebar glassmorphism */
+    section[data-testid="stSidebar"] {
+        background: rgba(17, 24, 39, 0.75) !important;
+        backdrop-filter: blur(20px) !important;
+        -webkit-backdrop-filter: blur(20px) !important;
+        border-right: 1px solid rgba(75, 85, 99, 0.3) !important;
+    }
+
+    /* Tab styling */
+    .stTabs [data-baseweb="tab-list"] {
+        background: rgba(17, 24, 39, 0.4);
+        border-radius: 12px;
+        padding: 4px;
+        gap: 4px;
+        backdrop-filter: blur(8px);
+    }
+    .stTabs [data-baseweb="tab"] {
+        border-radius: 8px;
+        color: rgba(156, 163, 175, 0.8);
+        font-weight: 500;
+    }
+    .stTabs [aria-selected="true"] {
+        background: rgba(99, 102, 241, 0.2) !important;
+        color: #A5B4FC !important;
+        border-bottom: 2px solid #818CF8 !important;
+    }
+
+    /* Metric widgets */
+    [data-testid="stMetric"] {
+        background: rgba(17, 24, 39, 0.5);
+        backdrop-filter: blur(10px);
+        border: 1px solid rgba(75, 85, 99, 0.3);
+        border-radius: 12px;
+        padding: 14px;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+    }
+
+    /* Dataframe styling */
+    [data-testid="stDataFrame"] {
+        border-radius: 12px;
+        overflow: hidden;
+        border: 1px solid rgba(75, 85, 99, 0.3);
+    }
+
+    /* Code blocks */
+    .stCodeBlock {
+        border-radius: 12px !important;
+        border: 1px solid rgba(75, 85, 99, 0.3) !important;
+    }
+
+    /* JSON viewer */
+    [data-testid="stJson"] {
+        background: rgba(17, 24, 39, 0.5) !important;
+        border-radius: 12px;
+        border: 1px solid rgba(75, 85, 99, 0.3);
+    }
+
+    /* Button styling */
+    .stButton > button[kind="primary"] {
+        background: linear-gradient(135deg, #6366F1, #8B5CF6, #A855F7) !important;
+        border: none !important;
+        border-radius: 10px !important;
+        font-weight: 600 !important;
+        box-shadow: 0 4px 20px rgba(99, 102, 241, 0.35) !important;
+        transition: all 0.3s ease !important;
+    }
+    .stButton > button[kind="primary"]:hover {
+        box-shadow: 0 6px 28px rgba(99, 102, 241, 0.5) !important;
+        transform: translateY(-1px) !important;
+    }

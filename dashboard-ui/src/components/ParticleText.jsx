@@ -177,7 +177,7 @@ export default function ParticleText({
       canvas.removeEventListener('mouseleave', handleMouseLeave);
       cancelAnimationFrame(animationFrameId);
     };
-  }, [text, particleSize, density, color, highlightColor, scatter, gatherDuration, stagger, pointerRepel, repelRadius, idleDrift, glow]);
+  }, [text, particleSize, density, color, highlightColor, scatter, gatherDuration, stagger, pointerRepel, repelRadius, idleDrift, glow, fontWeight, fontFamily]);
 
   return (
     <div style={{ width: '100%', height: '100%', minHeight: 180, position: 'relative', overflow: 'hidden' }}>

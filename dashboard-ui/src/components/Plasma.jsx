@@ -24,7 +24,9 @@ void main() {
 
 const ORIGINAL_QUALITY = 60;
 
-const buildFragment = (iterations) => {
+// Quality is driven by the uQuality uniform, not by a compile-time
+// substitution, so this builder takes no parameter.
+const buildFragment = () => {
   return `#version 300 es
 precision highp float;
 uniform vec2 iResolution;
@@ -141,7 +143,7 @@ const Plasma = ({
 
     const program = new Program(gl, {
       vertex: vertex,
-      fragment: buildFragment(iterations),
+      fragment: buildFragment(),
       uniforms: {
         iTime: { value: 0 },
         iResolution: { value: new Float32Array([1, 1]) },
