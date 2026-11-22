@@ -1,12 +1,23 @@
 # Autonomous Self-Healing Data Pipeline Agent 🤖⚡
 
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg?logo=python&logoColor=white)](https://www.python.org/)
-[![React 19](https://img.shields.io/badge/React-19.x-61dafb.svg?logo=react&logoColor=black)](https://react.dev/)
-[![Vite](https://img.shields.io/badge/Vite-8.x-646cff.svg?logo=vite&logoColor=white)](https://vitejs.dev/)
-[![Flask](https://img.shields.io/badge/Flask-3.0%2B-000000.svg?logo=flask&logoColor=white)](https://flask.palletsprojects.com/)
-[![Google Gemini](https://img.shields.io/badge/Google%20Gemini-2.5%20Flash-4285F4.svg?logo=google&logoColor=white)](https://ai.google.dev/)
+<!-- Every version below matches requirements.txt or dashboard-ui/package.json.
+     Badges for XGBoost and Tailwind CSS were removed because neither is used
+     anywhere in the project. -->
+
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
+[![Flask](https://img.shields.io/badge/Flask-3.x-000000.svg?logo=flask&logoColor=white)](https://flask.palletsprojects.com/)
 [![Scikit-Learn](https://img.shields.io/badge/Scikit--Learn-1.3%2B-F7931E.svg?logo=scikit-learn&logoColor=white)](https://scikit-learn.org/)
-[![Tests](https://img.shields.io/badge/Tests-242%20passing-brightgreen.svg?logo=pytest&logoColor=white)](https://docs.pytest.org/)
+[![Pydantic](https://img.shields.io/badge/Pydantic-2.x-E92063.svg?logo=pydantic&logoColor=white)](https://docs.pydantic.dev/)
+[![Google Gemini](https://img.shields.io/badge/Gemini-2.5%20Flash-4285F4.svg?logo=googlegemini&logoColor=white)](https://ai.google.dev/)
+
+[![React](https://img.shields.io/badge/React-19.x-61DAFB.svg?logo=react&logoColor=black)](https://react.dev/)
+[![Vite](https://img.shields.io/badge/Vite-8.x-646CFF.svg?logo=vite&logoColor=white)](https://vitejs.dev/)
+[![Streamlit](https://img.shields.io/badge/Streamlit-1.28%2B-FF4B4B.svg?logo=streamlit&logoColor=white)](https://streamlit.io/)
+[![Oxlint](https://img.shields.io/badge/Oxlint-clean-4B32C3.svg?logo=oxc&logoColor=white)](https://oxc.rs/)
+
+[![Tests](https://img.shields.io/badge/pytest-242%20passing-0A9EDC.svg?logo=pytest&logoColor=white)](tests/)
+[![Offline](https://img.shields.io/badge/test%20suite-no%20network-informational.svg)](conftest.py)
+[![Sandbox](https://img.shields.io/badge/patch%20sandbox-AST%20allowlist%20%2B%20subprocess-important.svg)](src/layer3_patcher/sandbox.py)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A **self-healing data ingestion agent**. When an upstream provider silently
