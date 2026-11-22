@@ -16,6 +16,7 @@ import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 
+from src.ingestion.dedup import DuplicateTracker
 from src.ingestion.injector import ANOMALY_CLASSES
 from src.layer1_detector.feature_extractor import FeatureExtractor
 from src.utils import config
@@ -25,8 +26,15 @@ LABEL_TO_INDEX = {name: index for index, name in enumerate(ANOMALY_CLASSES)}
 
 
 def build_feature_matrix(frame: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Vectorise a dataset frame into (X, y, row_ids)."""
+    """Vectorise a dataset frame into (X, y, row_ids).
+
+    Rows are processed in file order through a single DuplicateTracker, so
+    the content-based `duplicate_flag` feature is reproduced exactly as it
+    would be seen by a live stream. Order matters: a replayed record is
+    only a duplicate relative to what preceded it.
+    """
     extractor = FeatureExtractor()
+    tracker = DuplicateTracker()
     features, labels, row_ids = [], [], []
 
     for _, row in frame.iterrows():
@@ -39,7 +47,9 @@ def build_feature_matrix(frame: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, n
             logger.warning("Skipping row %s with unparseable payload: %s", row.get("id"), exc)
             continue
 
-        features.append(extractor.extract_features(payload))
+        features.append(
+            extractor.extract_features(payload, duplicate_tracker=tracker)
+        )
         labels.append(LABEL_TO_INDEX[label])
         row_ids.append(int(row["id"]))
 
