@@ -1,131 +1,274 @@
+"""REST API for the self-healing pipeline agent.
+
+Security and correctness fixes over the previous version:
+  * no more `debug=True` on `0.0.0.0`, which exposed the Werkzeug console
+    (remote code execution) to anything that could reach the port; host,
+    port and debug now come from configuration and default to loopback with
+    the debugger off;
+  * CORS is restricted to configured origins instead of every origin;
+  * `pipeline_id` and `anomaly_type` are validated and rejected with 400
+    rather than silently no-opping or falling back to the weather pipeline;
+  * `/api/evaluate` is cached, so a public GET no longer re-runs a full
+    1200-record evaluation on every request;
+  * the app is built by a factory so tests can drive it without binding a port.
+"""
+from __future__ import annotations
+
 import os
 import sys
-import json
+import threading
+from typing import Any, Dict, Optional, Tuple
+
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
-# Add project root to sys.path
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+from src.ingestion.injector import ANOMALY_CLASSES, SyntheticAnomalyInjector
 from src.ingestion.pipeline_registry import registry
-from src.ingestion.injector import SyntheticAnomalyInjector, ANOMALY_CLASSES
-from src.layer1_detector.model import MLAnomalyDetector
 from src.layer1_detector.evaluator import evaluate_layer1
 from src.layer2_diagnostician.agent import LLMDiagnosticAgent
 from src.layer3_patcher.auto_healer import SelfHealingOrchestrator
-from src.utils.logger import get_recent_audit_logs
-
-app = Flask(__name__)
-CORS(app)
-
-# Initialize pipeline components once at startup
-injector = SyntheticAnomalyInjector()
-detector = MLAnomalyDetector()
-diagnostician = LLMDiagnosticAgent()
-orchestrator = SelfHealingOrchestrator()
+from src.layer1_detector.model import MLAnomalyDetector
+from src.utils import config
+from src.utils.logger import get_recent_audit_logs, logger
 
 
-@app.route("/api/pipelines", methods=["GET"])
-def get_pipelines():
-    return jsonify({"pipelines": registry.list_pipelines()})
+def create_app() -> Flask:
+    """Build and configure the Flask application."""
+    app = Flask(__name__)
+    CORS(app, origins=config.CORS_ORIGINS)
 
+    # Components are built once; each is cheap to share and holds no
+    # per-request state. The orchestrator's parser table is process-wide by
+    # design -- that is what "hot-swapped parser" means here.
+    injector = SyntheticAnomalyInjector()
+    detector = MLAnomalyDetector()
+    diagnostician = LLMDiagnosticAgent()
+    orchestrator = SelfHealingOrchestrator()
 
-@app.route("/api/anomaly-classes", methods=["GET"])
-def get_anomaly_classes():
-    return jsonify({"classes": ANOMALY_CLASSES})
+    # Memoised evaluation: the underlying dataset only changes when the
+    # training pipeline is re-run, so there is no reason to recompute it per
+    # request. Guarded by a lock so concurrent callers do not stampede.
+    evaluation_cache: Dict[str, Any] = {}
+    evaluation_lock = threading.Lock()
 
+    def _json_body() -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        """Parse a JSON request body without raising on malformed input."""
+        body = request.get_json(silent=True)
+        if body is None:
+            return None, "Request body must be valid JSON."
+        if not isinstance(body, dict):
+            return None, "Request body must be a JSON object."
+        return body, None
 
-@app.route("/api/schema", methods=["GET"])
-def get_schema():
-    pipeline_id = request.args.get("pipeline_id", "weather")
-    pipeline = registry.get_pipeline(pipeline_id)
-    return jsonify({"schema": pipeline.get_schema_spec()})
+    def _validate_pipeline_id(pipeline_id: Any) -> Tuple[Optional[Any], Optional[str]]:
+        if not isinstance(pipeline_id, str) or not pipeline_id:
+            return None, "pipeline_id must be a non-empty string."
+        pipeline = registry.get_pipeline(pipeline_id)
+        if pipeline is None:
+            return None, (
+                f"Unknown pipeline_id '{pipeline_id}'. "
+                f"Valid ids: {', '.join(registry.pipeline_ids())}."
+            )
+        return pipeline, None
 
+    def _validate_anomaly_type(anomaly_type: Any) -> Tuple[Optional[str], Optional[str]]:
+        if not isinstance(anomaly_type, str) or not anomaly_type:
+            return None, "anomaly_type must be a non-empty string."
+        if anomaly_type not in ANOMALY_CLASSES:
+            return None, (
+                f"Unknown anomaly_type '{anomaly_type}'. "
+                f"Valid types: {', '.join(ANOMALY_CLASSES)}."
+            )
+        return anomaly_type, None
 
-@app.route("/api/run-pipeline", methods=["POST"])
-def run_pipeline():
-    """Full pipeline: fetch -> inject -> detect -> diagnose -> heal."""
-    data = request.get_json() or {}
-    anomaly_type = data.get("anomaly_type", "schema_drift")
-    pipeline_id = data.get("pipeline_id", "weather")
+    # -- routes --------------------------------------------------------------
 
-    pipeline = registry.get_pipeline(pipeline_id)
+    @app.get("/api/health")
+    def health():
+        """Readiness probe reporting which optional components are available."""
+        return jsonify({
+            "status": "ok",
+            "model_loaded": detector.is_trained,
+            "llm_enabled": diagnostician.llm_enabled,
+            "pipelines": registry.pipeline_ids(),
+            "active_parsers": sorted(orchestrator.active_parsers),
+        })
 
-    # Step 1: Fetch clean payload for selected pipeline
-    clean_payload = pipeline.fetch_clean_sample()
+    @app.get("/api/pipelines")
+    def get_pipelines():
+        return jsonify({"pipelines": registry.list_pipelines()})
 
-    # Step 2: Inject anomaly using pipeline's rename candidates & valid ranges
-    corrupted, label, meta = injector.inject_anomaly(
-        clean_payload,
-        target_anomaly=anomaly_type,
-        field_renames=pipeline.field_renames,
-        valid_ranges=pipeline.valid_ranges
-    )
+    @app.get("/api/anomaly-classes")
+    def get_anomaly_classes():
+        return jsonify({"classes": list(ANOMALY_CLASSES)})
 
-    # Step 3: Layer 1 - ML Detection
-    detection = detector.detect(
-        corrupted,
-        expected_fields=pipeline.expected_schema,
-        valid_ranges=pipeline.valid_ranges
-    )
-
-    result = {
-        "pipeline_info": {
-            "id": pipeline.pipeline_id,
-            "name": pipeline.name,
-            "icon": pipeline.icon,
-        },
-        "clean_payload": clean_payload,
-        "corrupted_payload": corrupted,
-        "injected_anomaly": label,
-        "injection_meta": meta,
-        "layer1_detection": detection,
-        "layer2_diagnosis": None,
-        "layer3_patch": None,
-        "layer3_verification": None,
-        "healed_payload": None,
-        "heal_success": None,
-    }
-
-    # Step 4 & 5: If anomaly detected, run Layer 2 & 3
-    if detection["is_anomaly"]:
-        diag = diagnostician.diagnose(
-            failing_payload=corrupted,
-            expected_schema=pipeline.get_schema_spec(),
-            layer1_result=detection,
+    @app.get("/api/schema")
+    def get_schema():
+        pipeline, error = _validate_pipeline_id(
+            request.args.get("pipeline_id", registry.DEFAULT_PIPELINE_ID)
         )
-        result["layer2_diagnosis"] = diag.model_dump()
+        if error:
+            return jsonify({"error": error}), 400
+        return jsonify({
+            "pipeline_id": pipeline.pipeline_id,
+            "schema": pipeline.get_schema_spec(),
+            "valid_ranges": {k: list(v) for k, v in pipeline.valid_ranges.items()},
+        })
 
-        success, patch_code, verif = orchestrator.heal_pipeline(
-            diagnostic=diag,
-            failing_payload=corrupted,
-            pipeline_id=pipeline.pipeline_id
+    @app.post("/api/run-pipeline")
+    def run_pipeline():
+        """Full loop: fetch -> inject -> detect -> diagnose -> heal."""
+        body, error = _json_body()
+        if error:
+            return jsonify({"error": error}), 400
+
+        pipeline, error = _validate_pipeline_id(
+            body.get("pipeline_id", registry.DEFAULT_PIPELINE_ID)
         )
-        result["layer3_patch"] = patch_code
-        result["layer3_verification"] = verif
-        result["heal_success"] = success
+        if error:
+            return jsonify({"error": error}), 400
 
-        if success:
-            result["healed_payload"] = orchestrator.parse(dict(corrupted), pipeline_id=pipeline.pipeline_id)
+        anomaly_type, error = _validate_anomaly_type(
+            body.get("anomaly_type", "schema_drift")
+        )
+        if error:
+            return jsonify({"error": error}), 400
 
-    return jsonify(result)
+        try:
+            clean_payload = pipeline.fetch_clean_sample()
+            corrupted, label, meta = injector.inject_anomaly(
+                clean_payload,
+                target_anomaly=anomaly_type,
+                field_renames=pipeline.field_renames,
+                valid_ranges=pipeline.valid_ranges,
+            )
+            detection = detector.detect(
+                corrupted,
+                expected_fields=pipeline.expected_schema,
+                valid_ranges=pipeline.valid_ranges,
+            )
+        except Exception as exc:
+            logger.exception("Pipeline run failed during ingestion/detection")
+            return jsonify({"error": f"Pipeline run failed: {exc}"}), 500
+
+        result: Dict[str, Any] = {
+            "pipeline_info": {
+                "id": pipeline.pipeline_id,
+                "name": pipeline.name,
+                "icon": pipeline.icon,
+                "data_source": pipeline.last_fetch_source,
+            },
+            "clean_payload": clean_payload,
+            "corrupted_payload": corrupted,
+            "injected_anomaly": label,
+            "injection_meta": meta,
+            "layer1_detection": detection,
+            "layer2_diagnosis": None,
+            "diagnosis_source": None,
+            "layer3_patch": None,
+            "layer3_verification": None,
+            "healed_payload": None,
+            "heal_success": None,
+        }
+
+        if not detection["is_anomaly"]:
+            return jsonify(result)
+
+        known_aliases = {
+            alias: canonical for canonical, alias in pipeline.field_renames.items()
+        }
+
+        try:
+            diagnosis = diagnostician.diagnose(
+                failing_payload=corrupted,
+                expected_schema=pipeline.get_schema_spec(),
+                layer1_result=detection,
+                valid_ranges=pipeline.valid_ranges,
+                known_aliases=known_aliases,
+            )
+            result["layer2_diagnosis"] = diagnosis.model_dump()
+            result["diagnosis_source"] = "gemini" if diagnostician.llm_enabled else "deterministic"
+
+            success, patch_code, verification = orchestrator.heal_pipeline(
+                diagnostic=diagnosis,
+                failing_payload=corrupted,
+                pipeline_id=pipeline.pipeline_id,
+                expected_schema=pipeline.expected_schema,
+                valid_ranges=pipeline.valid_ranges,
+                known_aliases=known_aliases,
+            )
+            result["layer3_patch"] = patch_code
+            result["layer3_verification"] = verification
+            result["heal_success"] = success
+
+            if success:
+                result["healed_payload"] = orchestrator.parse(
+                    corrupted, pipeline_id=pipeline.pipeline_id
+                )
+        except Exception as exc:
+            logger.exception("Pipeline run failed during diagnosis/healing")
+            return jsonify({"error": f"Diagnosis or healing failed: {exc}"}), 500
+
+        return jsonify(result)
+
+    @app.get("/api/evaluate")
+    def run_evaluation():
+        """Layer 1 benchmark metrics, computed once and cached."""
+        refresh = request.args.get("refresh", "").lower() in {"1", "true", "yes"}
+        with evaluation_lock:
+            if refresh or "metrics" not in evaluation_cache:
+                try:
+                    evaluation_cache["metrics"] = evaluate_layer1()
+                except Exception as exc:
+                    logger.exception("Layer 1 evaluation failed")
+                    return jsonify({"error": f"Evaluation failed: {exc}"}), 500
+            metrics = evaluation_cache["metrics"]
+
+        if not metrics:
+            return jsonify({
+                "error": "No evaluation data available. Run run_data_and_train.py "
+                         "to generate the dataset and train the model."
+            }), 503
+        return jsonify(metrics)
+
+    @app.get("/api/audit-logs")
+    def get_audit_logs():
+        raw_limit = request.args.get("limit", "30")
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError):
+            limit = 30
+        logs = get_recent_audit_logs(limit=limit)
+        return jsonify({"logs": logs, "limit": min(max(limit, 1), config.AUDIT_LOG_MAX_LIMIT)})
+
+    @app.errorhandler(404)
+    def not_found(_error):
+        return jsonify({"error": "Endpoint not found."}), 404
+
+    @app.errorhandler(500)
+    def server_error(_error):  # pragma: no cover - defensive
+        return jsonify({"error": "Internal server error."}), 500
+
+    return app
 
 
-@app.route("/api/evaluate", methods=["GET"])
-def run_evaluation():
-    """Evaluate Layer 1 ML model metrics."""
-    metrics = evaluate_layer1()
-    return jsonify(metrics)
-
-
-@app.route("/api/audit-logs", methods=["GET"])
-def get_audit_logs():
-    limit = request.args.get("limit", 30, type=int)
-    logs = get_recent_audit_logs(limit=limit)
-    return jsonify({"logs": logs})
+app = create_app()
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True, use_reloader=False)
+    if config.API_DEBUG:
+        logger.warning(
+            "API_DEBUG is enabled: the Werkzeug debugger allows arbitrary code "
+            "execution. Never enable this on a reachable interface."
+        )
+    logger.info("Starting API on http://%s:%d", config.API_HOST, config.API_PORT)
+    app.run(
+        host=config.API_HOST,
+        port=config.API_PORT,
+        debug=config.API_DEBUG,
+        use_reloader=False,
+    )

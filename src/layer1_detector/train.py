@@ -1,55 +1,130 @@
-import os
+"""Layer 1 training: fit the anomaly classifier and persist its split.
+
+The split indices are written to disk alongside the model so evaluation can
+score on data the model never saw. Previously the evaluator re-read the whole
+dataset and reported metrics computed over the training rows as well, which
+is why the reported figures were not a measurement of generalisation.
+"""
+from __future__ import annotations
+
 import json
+from typing import Any, Dict, Optional, Tuple
+
 import joblib
-import pandas as pd
 import numpy as np
+import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
-from src.layer1_detector.feature_extractor import FeatureExtractor
+
 from src.ingestion.injector import ANOMALY_CLASSES
+from src.layer1_detector.feature_extractor import FeatureExtractor
+from src.utils import config
 from src.utils.logger import logger
 
-DATA_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data", "synthetic", "dataset.csv")
-MODEL_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data", "model.joblib")
+LABEL_TO_INDEX = {name: index for index, name in enumerate(ANOMALY_CLASSES)}
 
-def train_model():
-    """Trains Random Forest classifier for Layer 1 Anomaly Detection."""
-    if not os.path.exists(DATA_PATH):
-        logger.error(f"Dataset file missing at {DATA_PATH}. Run generate_data.py first.")
+
+def build_feature_matrix(frame: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Vectorise a dataset frame into (X, y, row_ids)."""
+    extractor = FeatureExtractor()
+    features, labels, row_ids = [], [], []
+
+    for _, row in frame.iterrows():
+        label = row["label"]
+        if label not in LABEL_TO_INDEX:
+            continue
+        try:
+            payload = json.loads(row["payload_json"])
+        except (TypeError, ValueError) as exc:
+            logger.warning("Skipping row %s with unparseable payload: %s", row.get("id"), exc)
+            continue
+
+        features.append(extractor.extract_features(payload))
+        labels.append(LABEL_TO_INDEX[label])
+        row_ids.append(int(row["id"]))
+
+    return np.array(features), np.array(labels), np.array(row_ids)
+
+
+def train_model(dataset_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Train the Layer 1 classifier; returns a summary or None on failure."""
+    path = dataset_path or config.DATASET_PATH
+    if not str(path) or not config.DATASET_PATH.exists() and dataset_path is None:
+        logger.error(
+            "Dataset missing at %s. Run run_data_and_train.py (or "
+            "src/ingestion/generate_data.py) first.",
+            config.DATASET_PATH,
+        )
         return None
 
-    df = pd.read_csv(DATA_PATH)
-    extractor = FeatureExtractor()
+    frame = pd.read_csv(path)
+    X, y, row_ids = build_feature_matrix(frame)
 
-    X = []
-    y = []
+    if len(X) == 0:
+        logger.error("Dataset at %s produced no usable rows.", path)
+        return None
 
-    label_to_idx = {name: idx for idx, name in enumerate(ANOMALY_CLASSES)}
+    present = sorted(set(y.tolist()))
+    missing_classes = [
+        ANOMALY_CLASSES[index] for index in range(len(ANOMALY_CLASSES))
+        if index not in present
+    ]
+    if missing_classes:
+        logger.warning(
+            "Dataset contains no examples of: %s. The model cannot predict them.",
+            ", ".join(missing_classes),
+        )
 
-    for _, row in df.iterrows():
-        payload = json.loads(row["payload_json"])
-        feats = extractor.extract_features(payload)
-        label_str = row["label"]
-        if label_str in label_to_idx:
-            X.append(feats)
-            y.append(label_to_idx[label_str])
+    # Stratify only when every class has enough members for the split.
+    _, counts = np.unique(y, return_counts=True)
+    stratify = y if counts.min() >= 2 else None
 
-    X = np.array(X)
-    y = np.array(y)
+    indices = np.arange(len(X))
+    train_idx, test_idx = train_test_split(
+        indices,
+        test_size=config.TEST_SPLIT_SIZE,
+        random_state=config.RANDOM_SEED,
+        stratify=stratify,
+    )
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+    classifier = RandomForestClassifier(
+        n_estimators=100,
+        random_state=config.RANDOM_SEED,
+        n_jobs=-1,
+    )
+    classifier.fit(X[train_idx], y[train_idx])
 
-    clf = RandomForestClassifier(n_estimators=100, random_state=42)
-    clf.fit(X_train, y_train)
+    train_accuracy = float(classifier.score(X[train_idx], y[train_idx]))
+    test_accuracy = float(classifier.score(X[test_idx], y[test_idx]))
+    logger.info(
+        "Training complete. Train accuracy: %.4f, held-out test accuracy: %.4f",
+        train_accuracy, test_accuracy,
+    )
 
-    train_acc = clf.score(X_train, y_train)
-    test_acc = clf.score(X_test, y_test)
+    joblib.dump(classifier, config.MODEL_PATH)
+    logger.info("Saved Layer 1 model to %s", config.MODEL_PATH)
 
-    logger.info(f"Model Training Complete! Train Acc: {train_acc:.4f}, Test Acc: {test_acc:.4f}")
+    split = {
+        "seed": config.RANDOM_SEED,
+        "test_size": config.TEST_SPLIT_SIZE,
+        "dataset_path": str(path),
+        "dataset_rows": int(len(frame)),
+        "feature_names": list(FeatureExtractor.FEATURE_NAMES),
+        "train_row_ids": sorted(int(i) for i in row_ids[train_idx]),
+        "test_row_ids": sorted(int(i) for i in row_ids[test_idx]),
+    }
+    with open(config.SPLIT_PATH, "w", encoding="utf-8") as handle:
+        json.dump(split, handle, indent=2)
+    logger.info("Saved train/test split to %s", config.SPLIT_PATH)
 
-    joblib.dump(clf, MODEL_PATH)
-    logger.info(f"Saved trained Layer 1 model to {MODEL_PATH}")
-    return clf
+    return {
+        "train_accuracy": round(train_accuracy, 4),
+        "test_accuracy": round(test_accuracy, 4),
+        "train_rows": int(len(train_idx)),
+        "test_rows": int(len(test_idx)),
+        "missing_classes": missing_classes,
+    }
+
 
 if __name__ == "__main__":
     train_model()

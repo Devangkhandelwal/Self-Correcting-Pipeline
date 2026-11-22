@@ -1,54 +1,39 @@
-import requests
-import json
-from typing import Dict, Any, List
+"""Weather ingestion client.
 
-EXPECTED_SCHEMA = {
-    "latitude": float,
-    "longitude": float,
-    "temperature_2m": float,
-    "relative_humidity_2m": float,
-    "precipitation": float,
-    "surface_pressure": float,
-    "wind_speed_10m": float,
-    "time": str
-}
+This used to carry its own copy of the Open-Meteo fetch, URL, schema and
+offline fallback -- duplicating WeatherPipeline in pipeline_registry, with the
+two drifting apart. It is now a thin facade over that single definition, kept
+because the CLI demo and tests use this entrypoint.
+"""
+from __future__ import annotations
+
+from typing import Any, Dict, Optional
+
+from src.ingestion.pipeline_registry import WeatherPipeline
+
+#: Canonical weather schema. Re-exported for backward compatibility; the
+#: definition lives on WeatherPipeline.
+EXPECTED_SCHEMA = WeatherPipeline().expected_schema
+
 
 class WeatherAPIClient:
-    """Fetches weather data from Open-Meteo API."""
-    def __init__(self, lat: float = 40.7128, lon: float = -74.0060):
-        self.url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,relative_humidity_2m,precipitation,surface_pressure,wind_speed_10m"
+    """Fetches clean weather payloads from the Open-Meteo API."""
+
+    def __init__(self, lat: Optional[float] = None, lon: Optional[float] = None):
+        self._pipeline = WeatherPipeline(latitude=lat, longitude=lon)
+
+    @property
+    def last_fetch_source(self) -> str:
+        """Provenance of the most recent fetch: 'live' or 'cached_baseline'."""
+        return self._pipeline.last_fetch_source
+
+    @property
+    def valid_ranges(self) -> Dict[str, tuple]:
+        return self._pipeline.valid_ranges
 
     def fetch_live_sample(self) -> Dict[str, Any]:
-        """Fetches a single clean weather payload record."""
-        try:
-            resp = requests.get(self.url, timeout=10)
-            resp.raise_for_status()
-            data = resp.json()
-            current = data.get("current", {})
-            payload = {
-                "latitude": data.get("latitude"),
-                "longitude": data.get("longitude"),
-                "temperature_2m": current.get("temperature_2m"),
-                "relative_humidity_2m": current.get("relative_humidity_2m"),
-                "precipitation": current.get("precipitation"),
-                "surface_pressure": current.get("surface_pressure"),
-                "wind_speed_10m": current.get("wind_speed_10m"),
-                "time": current.get("time")
-            }
-            return payload
-        except Exception as e:
-            # Fallback mock clean data if offline or API error
-            return {
-                "latitude": 40.7128,
-                "longitude": -74.0060,
-                "temperature_2m": 22.4,
-                "relative_humidity_2m": 65.0,
-                "precipitation": 0.0,
-                "surface_pressure": 1013.2,
-                "wind_speed_10m": 12.5,
-                "time": "2026-08-22T12:00"
-            }
+        """Fetch one weather observation, falling back to a cached baseline."""
+        return self._pipeline.fetch_clean_sample()
 
-    @staticmethod
-    def get_expected_schema_spec() -> Dict[str, str]:
-        return {k: v.__name__ for k, v in EXPECTED_SCHEMA.items()}
+    def get_expected_schema_spec(self) -> Dict[str, str]:
+        return self._pipeline.get_schema_spec()

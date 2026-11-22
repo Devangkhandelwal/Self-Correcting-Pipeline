@@ -1,85 +1,134 @@
+"""CLI walkthrough of the full detect -> diagnose -> heal loop.
+
+Accepts --pipeline and --anomaly so the demo covers all four domains and the
+whole anomaly taxonomy, rather than only weather schema drift. Exits non-zero
+when healing fails, so it is usable as a smoke check in CI.
+"""
+from __future__ import annotations
+
+import argparse
 import json
-import time
-from src.ingestion.api_client import WeatherAPIClient
-from src.ingestion.injector import SyntheticAnomalyInjector
+import sys
+
+from src.ingestion.injector import ANOMALY_CLASSES, SyntheticAnomalyInjector
+from src.ingestion.pipeline_registry import registry
 from src.layer1_detector.model import MLAnomalyDetector
 from src.layer2_diagnostician.agent import LLMDiagnosticAgent
 from src.layer3_patcher.auto_healer import SelfHealingOrchestrator
-from src.utils.logger import logger
 
-def run_demo():
-    print("=" * 70)
+RULE = "=" * 72
+THIN = "-" * 72
+
+
+def run_demo(pipeline_id: str = "weather", anomaly: str = "schema_drift") -> bool:
+    """Run one end-to-end healing cycle; returns True when the pipeline healed."""
+    print(RULE)
     print("SELF-CORRECTING DATA PIPELINE AGENT - DEMO RUN")
-    print("=" * 70)
+    print(RULE)
 
+    pipeline = registry.require_pipeline(pipeline_id)
+    known_aliases = {
+        alias: canonical for canonical, alias in pipeline.field_renames.items()
+    }
 
-    # 1. Initialize System Components
-    client = WeatherAPIClient()
     injector = SyntheticAnomalyInjector()
     detector = MLAnomalyDetector()
     diagnostician = LLMDiagnosticAgent()
     orchestrator = SelfHealingOrchestrator()
 
-    # 2. Fetch Clean API Payload
-    print("\n[STEP 1] Fetching live clean payload from Open-Meteo API...")
-    clean_payload = client.fetch_live_sample()
-    print("Clean Payload:")
+    print(f"\n[STEP 1] Fetching a clean payload from {pipeline.name}...")
+    clean_payload = pipeline.fetch_clean_sample()
+    print(f"Data source: {pipeline.last_fetch_source}")
     print(json.dumps(clean_payload, indent=2))
 
-    # 3. Inject Synthetic Anomaly (Schema Drift)
-    print("\n" + "-" * 70)
-    print("[STEP 2] Injecting Synthetic Anomaly (Category: schema_drift)...")
-    corrupted_payload, label, meta = injector.inject_anomaly(clean_payload, target_anomaly="schema_drift")
-    print(f"Applied Anomaly: {label}")
-    print("Corrupted Ingestion Payload:")
-    print(json.dumps(corrupted_payload, indent=2))
-
-    # 4. Layer 1: ML Anomaly Detector
-    print("\n" + "-" * 70)
-    print("[STEP 3] Running Layer 1: ML Anomaly Detector (RandomForest)...")
-    detection_res = detector.detect(corrupted_payload)
-    print(f"  • Is Anomaly Flagged : {detection_res['is_anomaly']}")
-    print(f"  • Predicted Category : {detection_res['anomaly_type']}")
-    print(f"  • Confidence Score  : {detection_res['confidence'] * 100:.1f}%")
-
-    if not detection_res["is_anomaly"]:
-        print("No anomaly detected. Pipeline continuing normally.")
-        return
-
-    # 5. Layer 2: Diagnostic Agent (LLM)
-    print("\n" + "-" * 70)
-    print("[STEP 4] Running Layer 2: LLM Diagnostic Agent...")
-    diag_report = diagnostician.diagnose(
-        failing_payload=corrupted_payload,
-        expected_schema=client.get_expected_schema_spec(),
-        layer1_result=detection_res
+    print("\n" + THIN)
+    print(f"[STEP 2] Injecting synthetic anomaly (category: {anomaly})...")
+    corrupted, label, meta = injector.inject_anomaly(
+        clean_payload,
+        target_anomaly=anomaly,
+        field_renames=pipeline.field_renames,
+        valid_ranges=pipeline.valid_ranges,
     )
-    print("Diagnostic Root Cause Report:")
-    print(json.dumps(diag_report.model_dump(), indent=2))
+    print(f"Applied anomaly: {label}")
+    print(json.dumps(corrupted, indent=2))
 
-    # 6. Layer 3: Patch Generation & Sandboxed Verification Loop
-    print("\n" + "-" * 70)
-    print("[STEP 5] Running Layer 3: Patch Generator & Sandbox Verification Loop...")
-    success, patch_code, verif_res = orchestrator.heal_pipeline(
-        diagnostic=diag_report,
-        failing_payload=corrupted_payload
+    print("\n" + THIN)
+    print("[STEP 3] Layer 1: ML anomaly detector...")
+    detection = detector.detect(
+        corrupted,
+        expected_fields=pipeline.expected_schema,
+        valid_ranges=pipeline.valid_ranges,
     )
+    print(f"  - Engine             : {detection.get('engine', 'unknown')}")
+    print(f"  - Anomaly flagged    : {detection['is_anomaly']}")
+    print(f"  - Predicted category : {detection['anomaly_type']}")
+    print(f"  - Confidence         : {detection['confidence'] * 100:.1f}%")
 
-    print(f"  • Patch Generated & Verification Passed : {success}")
-    print(f"  • Held-Out Verification Success Rate    : {verif_res.get('success_rate', 0.0) * 100:.1f}% ({verif_res.get('passed_count')}/{verif_res.get('total_count')} records)")
-    print("\nGenerated Python Parser Code Patch:")
+    if not detection["is_anomaly"]:
+        print("\nNo anomaly detected; pipeline continues normally.")
+        return True
+
+    print("\n" + THIN)
+    print("[STEP 4] Layer 2: diagnostic agent...")
+    print(f"  - Reasoning engine   : "
+          f"{'Gemini LLM' if diagnostician.llm_enabled else 'deterministic fallback'}")
+    diagnosis = diagnostician.diagnose(
+        failing_payload=corrupted,
+        expected_schema=pipeline.get_schema_spec(),
+        layer1_result=detection,
+        valid_ranges=pipeline.valid_ranges,
+        known_aliases=known_aliases,
+    )
+    print(json.dumps(diagnosis.model_dump(), indent=2))
+
+    print("\n" + THIN)
+    print("[STEP 5] Layer 3: patch generation & sandboxed verification...")
+    success, patch_code, verification = orchestrator.heal_pipeline(
+        diagnostic=diagnosis,
+        failing_payload=corrupted,
+        pipeline_id=pipeline_id,
+        expected_schema=pipeline.expected_schema,
+        valid_ranges=pipeline.valid_ranges,
+        known_aliases=known_aliases,
+    )
+    print(f"  - Verification passed : {success}")
+    print(f"  - Held-out pass rate  : "
+          f"{verification.get('success_rate', 0.0) * 100:.1f}% "
+          f"({verification.get('passed_count')}/{verification.get('total_count')} records)")
+    if not success and verification.get("error_trace"):
+        print(f"  - Failure detail      : {verification['error_trace'][:500]}")
+
+    print("\nGenerated parser patch:")
     print(patch_code)
 
-    # 7. Parse Corrupted Payload using Healed Parser
-    print("-" * 70)
-    print("[STEP 6] Parsing Corrupted Payload with Active Healed Parser...")
-    healed_output = orchestrator.parse(corrupted_payload)
-    print("Healed & Normalized Payload Output:")
-    print(json.dumps(healed_output, indent=2))
+    print(THIN)
+    print("[STEP 6] Parsing the corrupted payload with the active parser...")
+    healed = orchestrator.parse(corrupted, pipeline_id=pipeline_id)
+    print(json.dumps(healed, indent=2))
 
-    print("\n" + "=" * 70)
-    print("[SUCCESS] PIPELINE AUTO-HEALED SUCCESSFULLY! NO HUMAN INTERVENTION REQUIRED.")
-    print("=" * 70)
+    print("\n" + RULE)
+    if success:
+        print("[SUCCESS] PIPELINE AUTO-HEALED - NO HUMAN INTERVENTION REQUIRED.")
+    else:
+        print("[FAILED] PIPELINE COULD NOT BE HEALED AUTOMATICALLY.")
+        print("         The previous parser remains in effect; escalate to an operator.")
+    print(RULE)
+    return success
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--pipeline", default="weather", choices=registry.pipeline_ids(),
+        help="which ingestion pipeline to demonstrate",
+    )
+    parser.add_argument(
+        "--anomaly", default="schema_drift", choices=list(ANOMALY_CLASSES),
+        help="which anomaly class to inject",
+    )
+    args = parser.parse_args()
+    return 0 if run_demo(args.pipeline, args.anomaly) else 1
+
 
 if __name__ == "__main__":
-    run_demo()
+    sys.exit(main())
