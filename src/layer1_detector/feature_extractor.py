@@ -44,6 +44,54 @@ def __getattr__(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+def _value_fits_field(
+    value: Any,
+    declared: Optional[type],
+    bounds: Optional[tuple],
+) -> float:
+    """Score how well a value fits a field's declared type and range.
+
+    1.0  the value is the declared type and within range (or no range given)
+    0.5  the type is recoverable (numeric string, or number where str is
+         declared), or the type matches but the value is out of range
+    0.0  incompatible
+    """
+    if declared is None or value is None:
+        return 0.0
+
+    exact = False
+    partial = False
+
+    if declared in (float, int):
+        if isinstance(value, bool):
+            return 0.0  # bool is an int subclass but never a real measurement
+        if isinstance(value, (int, float)):
+            exact = True
+        elif isinstance(value, str):
+            try:
+                value = float(value.strip())
+                partial = True
+            except (TypeError, ValueError):
+                return 0.0
+    elif declared is str:
+        if isinstance(value, str):
+            exact = True
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            partial = True
+    elif isinstance(value, declared):
+        exact = True
+
+    if not (exact or partial):
+        return 0.0
+
+    # An out-of-range value is a weaker match than an in-range one.
+    if bounds is not None and isinstance(value, (int, float)):
+        if not (bounds[0] <= value <= bounds[1]):
+            return 0.5
+
+    return 1.0 if exact else 0.5
+
+
 class FeatureExtractor:
     """Extracts a numeric feature vector from a JSON payload."""
 
@@ -58,6 +106,7 @@ class FeatureExtractor:
         "duplicate_flag",
         "string_type_count",
         "bool_type_count",
+        "best_alias_value_compatibility",
     )
 
     def extract_features(
@@ -121,12 +170,26 @@ class FeatureExtractor:
 
         # Best string similarity between a missing field and an unexpected
         # key; a high score suggests a rename rather than a true omission.
+        #
+        # Similarity alone cannot separate a real rename from a missing
+        # field that merely arrived beside a lookalike key: both give
+        # missing=1, extra=1 and a low ratio. Value compatibility adds the
+        # signal that distinguishes them -- a renamed field's value still
+        # fits the declared type and range of the field it replaced.
         max_similarity = 0.0
+        best_value_fit = 0.0
         for extra in extra_keys:
             for missing in missing_keys:
                 ratio = difflib.SequenceMatcher(None, extra, missing).ratio()
                 if ratio > max_similarity:
                     max_similarity = ratio
+                fit = _value_fits_field(
+                    payload.get(extra),
+                    expected_fields.get(missing),
+                    valid_ranges.get(missing),
+                )
+                if fit > best_value_fit:
+                    best_value_fit = fit
 
         if duplicate_tracker is not None:
             duplicate_flag = 1.0 if duplicate_tracker.observe(payload) else 0.0
@@ -148,6 +211,7 @@ class FeatureExtractor:
             float(duplicate_flag),
             float(string_count),
             float(bool_count),
+            float(best_value_fit),
         ]
 
     def extract_feature_dict(

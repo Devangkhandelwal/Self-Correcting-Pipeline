@@ -171,6 +171,7 @@ class MLAnomalyDetector:
         missing = feature_dict["missing_expected_count"]
         extra = feature_dict["unexpected_extra_count"]
         similarity = feature_dict["max_key_similarity"]
+        value_fit = feature_dict.get("best_alias_value_compatibility", 0.0)
         type_mismatch = feature_dict["type_mismatch_count"]
         nulls = feature_dict["null_val_count"]
         outliers = feature_dict["outlier_count"]
@@ -186,8 +187,15 @@ class MLAnomalyDetector:
 
         if duplicate > 0:
             return verdict("duplicate_record", 0.99)
-        if missing > 0 and extra > 0 and similarity > config.KEY_SIMILARITY_THRESHOLD:
-            return verdict("schema_drift", 0.85)
+        # A rename is indicated either by a similar key name or by an
+        # unexpected key whose value fits the missing field exactly.
+        # The second arm catches semantic renames such as
+        # reorder_level -> min_stock, which score 0.09 on name similarity.
+        if missing > 0 and extra > 0:
+            if similarity > config.KEY_SIMILARITY_THRESHOLD:
+                return verdict("schema_drift", 0.85)
+            if value_fit >= 1.0:
+                return verdict("schema_drift", 0.70)
         if type_mismatch > 0:
             return verdict("type_mismatch", 0.90)
         if outliers > 0:

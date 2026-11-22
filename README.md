@@ -6,7 +6,7 @@
 [![Flask](https://img.shields.io/badge/Flask-3.0%2B-000000.svg?logo=flask&logoColor=white)](https://flask.palletsprojects.com/)
 [![Google Gemini](https://img.shields.io/badge/Google%20Gemini-2.5%20Flash-4285F4.svg?logo=google&logoColor=white)](https://ai.google.dev/)
 [![Scikit-Learn](https://img.shields.io/badge/Scikit--Learn-1.3%2B-F7931E.svg?logo=scikit-learn&logoColor=white)](https://scikit-learn.org/)
-[![Tests](https://img.shields.io/badge/Tests-135%20passing-brightgreen.svg?logo=pytest&logoColor=white)](https://docs.pytest.org/)
+[![Tests](https://img.shields.io/badge/Tests-208%20passing-brightgreen.svg?logo=pytest&logoColor=white)](https://docs.pytest.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A **self-healing data ingestion agent**. When an upstream provider silently
@@ -69,7 +69,7 @@ downstream data lake. Either way a human spends hours on triage.
                                       ▼
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │ LAYER 1 · ML Anomaly Detector                                                │
-│  10-feature payload vectoriser → RandomForest → class + confidence           │
+│  11-feature payload vectoriser → RandomForest → class + confidence           │
 │  Falls back to a rule baseline when no model is trained                       │
 └─────────────────────────────────────┬────────────────────────────────────────┘
                                       ▼ anomaly flagged
@@ -100,8 +100,8 @@ Every layer is driven by the **selected pipeline's own schema**, supplied by
 
 ### Layer 1 · ML Anomaly Detector (`src/layer1_detector/`)
 
-Ten structural features per payload, computed against the pipeline's declared
-schema and ranges:
+Eleven structural features per payload, computed against the pipeline's
+declared schema and ranges:
 
 | # | Feature | Meaning |
 |---|---------|---------|
@@ -115,10 +115,23 @@ schema and ranges:
 | 8 | `duplicate_flag` | record content has been seen before in this stream |
 | 9 | `string_type_count` | string-valued fields |
 | 10 | `bool_type_count` | boolean-valued fields |
+| 11 | `best_alias_value_compatibility` | does an unexpected key's *value* fit a missing field's declared type and range? |
 
 A `RandomForestClassifier` maps that vector to one of six classes. When no
 trained model is present the detector falls back to an explicit rule baseline,
 and `detect()` reports which engine produced the verdict.
+
+Feature 11 exists because features 2, 3 and 6 cannot separate two different
+situations. A real rename and a plain missing field that merely arrived beside
+a lookalike key both give `missing=1`, `extra=1` and a low similarity ratio —
+they are *feature-identical*, so no classifier can tell them apart, and Layer 1
+reported `reorder_level` → `min_stock` (similarity 0.09) as `null_field`.
+Value compatibility carries signal the name does not: a renamed
+`reorder_level` arriving as `min_stock: 50.0` has a value that fits
+`reorder_level`'s declared float range of 1–500, whereas a coincidental
+`reorder_mode: "auto"` does not. Scored 1.0 for an exact type-and-range fit,
+0.5 for a recoverable one (numeric string, or right type but out of range), and
+0.0 for incompatible.
 
 Feature 8 comes from a `DuplicateTracker` (`src/ingestion/dedup.py`), which
 keeps a bounded set of SHA-256 content fingerprints over schema-relevant
@@ -323,14 +336,25 @@ it. The labels are unchanged; only the features become ambiguous.
 | Engine | Precision | Recall | F1 |
 |---|---|---|---|
 | RandomForest | 100% | 100% | 100% |
-| Rule baseline | 90.96% | 89.58% | 89.09% |
+| Rule baseline | 98.48% | 98.33% | 98.33% |
 
-F1 lift **`+0.1091`**, agreement 89.6%. **Here the model does earn its place:**
-a learned decision boundary resolves the ambiguity that a hand-tuned constant
-cannot. `GET /api/evaluate` reports the measured lift and a verdict on it, so
-the claim is never stated without its evidence.
+F1 lift **`+0.0167`**, agreement 98.3%. The model is ahead, but only just.
 
-Reproduce either with `python run_data_and_train.py [--difficulty hard]`.
+**That gap used to be `+0.1091`, and closing it was the more useful result.**
+The original 10.9-point lead disappeared when feature 11 was added: the rule
+baseline went from 89.09% to 98.33% F1 on this same benchmark. Most of what
+looked like "ML value" was in fact a *missing feature* — the model was
+compensating, via an opaque decision boundary, for information the feature
+vector should have carried in the first place. Adding the feature improved the
+explainable baseline by 9.2 points and left the model with 1.7.
+
+The lesson generalises: a large model-over-baseline gap is as likely to
+indicate an inadequate feature set as a clever model. It is worth trying to
+close with a feature before concluding the model earned it.
+
+`GET /api/evaluate` reports the measured lift and a verdict on it, so the claim
+is never stated without its evidence. Reproduce either benchmark with
+`python run_data_and_train.py [--difficulty hard]`.
 
 ### Healing coverage
 
@@ -353,10 +377,12 @@ Being blunt, because the headline figures look better than they are:
    the classes are far cleaner here than in real traffic. 100% is a property of
    this dataset, not evidence of real-world accuracy — which is exactly why
    `--difficulty hard` exists.
-3. **"The model earns its place" is a claim about the hard benchmark only.**
-   The +0.109 lift is measured against confounders this project invented. It
-   demonstrates that a learned boundary beats a fixed threshold *when the task
-   is ambiguous*; it is not evidence of accuracy on live traffic.
+3. **The model's remaining advantage is small and benchmark-specific.**
+   The +0.017 lift is measured against confounders this project invented, and
+   it is what survived after a missing feature was supplied. The explainable
+   rule baseline is within 1.7 F1 points, so the RandomForest is not doing
+   heavy lifting here — on this evidence, shipping the rule baseline alone
+   would be a defensible choice.
 4. **There is no real-world labelled evaluation set.** Everything above is
    synthetic.
 5. **Declared-alias recovery is configuration, not inference.** When the
@@ -374,15 +400,32 @@ them next to the metrics.
 Layer 3 generates and executes Python, so this is load-bearing.
 
 **Verification** — candidate patches are screened by
-`sandbox.validate_patch_source` before anything runs. Rejected outright:
-`import` / `from`, `eval`, `exec`, `compile`, `open`, `__import__`, `globals`,
-`locals`, `getattr`/`setattr`, any dunder attribute access (blocking
-`{}.__class__.__bases__`-style escapes), lambdas, classes, `with`, `async`,
-generators, and sources without a top-level `parse_payload`. Screened code then
-runs in a **separate interpreter** launched with `-I` (isolated: no
-`PYTHONPATH`, no user site-packages, no inherited env influence) under a
-wall-clock timeout. A hostile or merely non-terminating patch cannot corrupt or
-hang the API process.
+`sandbox.validate_patch_source` before anything runs, against an **allowlist**
+of permitted AST node types. This matters: the screen was originally a
+denylist, and a denylist fails open. Every Python release adds syntax, so the
+set of forms to forbid is open-ended, and the original list silently permitted
+walrus assignments, `match` statements, comprehension scopes, starred
+unpacking, f-strings, decorators and nested functions. An allowlist rejects
+unknown syntax by default.
+
+The permitted set was derived empirically rather than guessed: 432 patches
+generated across every pipeline, strategy and anomaly category use exactly 39
+node types, and all 432 still validate. On top of the allowlist:
+
+- dangerous builtin *names* are denied — allowlisting cannot cover these,
+  since `eval(...)` is syntactically an ordinary `Call` on a `Name`;
+- any dunder attribute access is blocked, defeating
+  `{}.__class__.__bases__`-style escapes;
+- the module top level may contain only constants and function definitions,
+  because that module is executed on import when a patch is activated;
+- decorators and nested functions are rejected, so the entrypoint is the plain
+  function the sandbox believes it is calling.
+
+Screened code then runs in a **separate interpreter** launched with `-I`
+(isolated: no `PYTHONPATH`, no user site-packages, no inherited env influence)
+under a wall-clock timeout. `while` is not in the permitted subset, so a
+non-terminating patch has to loop via `for` — the timeout covers that, and is
+tested against it.
 
 **Activation** necessarily executes the patch in-process — that is what
 hot-swapping means — so every patch is re-screened on load, including patches
@@ -447,7 +490,7 @@ container or VM with seccomp and no network.
 │   │   ├── injector.py        # anomaly injection (seedable RNG)
 │   │   └── pipeline_registry.py  # single source of truth for all schemas
 │   ├── layer1_detector/
-│   │   ├── feature_extractor.py  # 10-feature vectoriser
+│   │   ├── feature_extractor.py  # 11-feature vectoriser
 │   │   ├── model.py           # classifier wrapper + rule baseline
 │   │   ├── train.py           # training; persists the split
 │   │   └── evaluator.py       # held-out evaluation + lift reporting
@@ -462,7 +505,7 @@ container or VM with seccomp and no network.
 │       ├── config.py          # all configuration, read from env
 │       └── logger.py          # rotating logs + JSONL audit trail
 │
-└── tests/                     # 135 tests
+└── tests/                     # 208 tests
     ├── test_api_validation.py      # request validation, bounds, health
     ├── test_dedup.py               # fingerprinting, tracker, replay injection
     ├── test_e2e_pipeline.py        # end-to-end weather cycle
@@ -472,7 +515,8 @@ container or VM with seccomp and no network.
     ├── test_multidomain_healing.py # every rename pair; every anomaly x pipeline
     ├── test_outlier_healing.py     # range-driven diagnosis + clamping
     ├── test_provenance.py          # healed records disclose what changed
-    └── test_sandbox_security.py    # malicious patches rejected; timeout enforced
+    ├── test_sandbox_security.py    # allowlist screening; timeout enforced
+    └── test_value_compatibility.py # rename inference beyond name similarity
 ```
 
 ---
@@ -576,27 +620,34 @@ the ingestion stage rather than a deployment knob.
 pytest tests/ -v
 ```
 
-135 tests, roughly 40 seconds. What they cover:
+208 tests, roughly 65 seconds. What they cover:
 
 ```text
-tests/test_api_validation.py ..........                          [  7%]
-tests/test_dedup.py .....................                        [ 23%]
-tests/test_e2e_pipeline.py .                                     [ 24%]
-tests/test_heldout_data.py ..                                    [ 25%]
-tests/test_injector.py .                                         [ 26%]
-tests/test_layer1.py ..                                          [ 27%]
-tests/test_multidomain_healing.py ..........................     [ 47%]
-tests/test_outlier_healing.py ............                       [ 56%]
-tests/test_provenance.py .........                               [ 63%]
-tests/test_sandbox_security.py ......................            [100%]
+tests/test_api_validation.py ..........                          [  4%]
+tests/test_dedup.py .....................                        [ 15%]
+tests/test_e2e_pipeline.py .                                     [ 15%]
+tests/test_heldout_data.py ..                                    [ 16%]
+tests/test_injector.py .                                         [ 17%]
+tests/test_layer1.py ..                                          [ 18%]
+tests/test_multidomain_healing.py ..........................     [ 30%]
+tests/test_outlier_healing.py ............                       [ 36%]
+tests/test_provenance.py .........                               [ 40%]
+tests/test_sandbox_security.py ........................................ [ 59%]
+tests/test_value_compatibility.py .....................................[100%]
 
-============================= 135 passed in ~40s ==============================
+============================= 208 passed in ~65s ==============================
 ```
 
 The suite deliberately enumerates **every declared rename pair** rather than
 letting the injector pick at random. An earlier random version masked a real
 defect: two semantic renames were never recovered, but the test only hit them
 when the RNG happened to choose those fields.
+
+`test_sandbox_security.py` validates all 432 patches the generator can emit
+against the allowlist, so hardening the screen cannot silently break patch
+generation. `test_value_compatibility.py` asserts the rule baseline — not only
+the model — recognises every declared rename, on the principle that a feature
+only the model can exploit is suspect.
 
 ---
 
@@ -633,11 +684,11 @@ Honest about what this does not do:
 - **Three of four pipelines are simulated.** Only `weather` hits a real API,
   and it returns the same observation for up to an hour — so repeated live
   fetches are genuine content duplicates.
-- **Layer 1 mislabels low-similarity drift when trained on standard data.** A
-  rename like `reorder_level` → `min_stock` is reported as `null_field`.
-  Healing still recovers the field, because Layer 3 consults the declared
-  alias table regardless of Layer 2's category — but the label is wrong. Train
-  with `--difficulty hard` to fix the label too.
+- **Rename inference is only as good as its two signals.** Name similarity
+  plus value compatibility correctly identify all 17 renames the registry
+  declares, but an undeclared rename to a field of the same type and range as
+  another missing field is still ambiguous — nothing in the payload
+  distinguishes which of two interchangeable fields the value belongs to.
 - **No authentication on the API.** It is bound to loopback by design.
   Exposing it requires adding auth.
 - **No live-traffic evaluation.** All metrics come from synthetic data.
